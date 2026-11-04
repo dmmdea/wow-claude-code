@@ -119,6 +119,9 @@ class Bridge:
         self.notify = notify
         self.state_path = cfgmod.home() / "state.json"
         self.state: dict = self._load_state()
+        if not self.state_path.is_file():
+            # Persist the fresh nonce at once so it is per install, not per run.
+            self.save_state()
         self.queue: deque[Request] = deque()
         self.current: Request | None = None
         self.stop_event = threading.Event()

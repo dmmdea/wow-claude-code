@@ -11,3 +11,5 @@ First release.
 - `wowclaude` companion (Python 3.10+, standard library only): `init`, `install`, `run`,
   `doctor`, `selfcheck`, `config`; backends for the Claude Code CLI, any OpenAI-compatible chat
   endpoint and the Anthropic Messages API; opt-in clipboard send path; desktop notifications.
+- The clipboard envelope nonce is written to `state.json` at the first start, so it is per
+  install rather than per run.
