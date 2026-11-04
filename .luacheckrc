@@ -42,6 +42,9 @@ read_globals = {
 	-- client functions
 	"ReloadUI",
 	"InCombatLockdown",
+	"IsControlKeyDown",
+	"GetAddOnMetadata",
+	"BackdropTemplateMixin",
 	"GetTime",
 	"GetServerTime",
 	"PlaySound",

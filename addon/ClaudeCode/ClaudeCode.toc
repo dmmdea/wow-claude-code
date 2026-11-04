@@ -1,0 +1,16 @@
+## Interface: 16001, 120107, 11509
+## Title: Claude Code
+## Notes: Start and read Claude Code (or any LLM endpoint) sessions from an in-game window. Needs the wowclaude companion running on your PC.
+## Author: dmmdea
+## Version: 0.1.0
+## SavedVariables: ClaudeCodeDB
+## OptionalDeps: ClaudeCode_Data
+## IconTexture: Interface\Icons\INV_Misc_Note_01
+## AddonCompartmentFunc: ClaudeCode_OnAddonCompartmentClick
+## Category: Development
+## X-Website: https://github.com/dmmdea/wow-claude-code
+## X-License: Apache-2.0
+
+Json.lua
+Core.lua
+UI.lua
