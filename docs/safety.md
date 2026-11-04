@@ -90,5 +90,17 @@ long track record and no known ban.
 Off by default. When on, the watcher polls the clipboard sequence number (no clipboard access
 at all while nothing changes), reads the text only on a change, discards anything that does not
 start with the envelope prefix without keeping a copy, a hash or a length, and never writes the
-clipboard. It is a convenience for people who do not want a reload per send; turn it on only if
-that trade is worth it to you.
+clipboard. An envelope also has to carry the per-install nonce the companion published in the
+data file, so a web page or another program cannot start a run by filling your clipboard. It is
+a convenience for people who do not want a reload per send; turn it on only if that trade is
+worth it to you.
+
+## Other hardening worth knowing
+
+- The prompt is written to the Claude Code CLI's standard input, never placed on its command
+  line, so prompt text can never be parsed as an option or meet a shell.
+- HTTP backends refuse redirects (a redirect would otherwise carry the key to another host), and
+  key material is scrubbed from error text before it reaches the log, the data file or a toast.
+- A request is marked consumed before it runs, so a crash never replays an agentic session.
+- `config set` refuses an `api_key_env` value that looks like a key instead of a variable name,
+  and `config show` masks header values whose names look secret.

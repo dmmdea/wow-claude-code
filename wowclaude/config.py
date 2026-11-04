@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
@@ -66,6 +67,9 @@ class BackendConfig:
     def validate(self, name: str) -> None:
         if self.type not in BACKEND_TYPES:
             raise ValueError(f"backend {name!r}: unknown type {self.type!r}; expected one of {BACKEND_TYPES}")
+        if self.api_key_env and not _ENV_NAME.match(self.api_key_env):
+            # Never echo the value: it is probably the key itself, pasted by mistake.
+            raise ValueError(f"backend {name!r}: api_key_env must be the NAME of an environment variable, not the key; the value was not kept")
         if self.type == "openai" and not self.base_url:
             raise ValueError(f"backend {name!r}: type openai needs base_url (the server's /v1 root)")
         if self.type in ("openai", "anthropic") and not self.model:
@@ -163,16 +167,29 @@ def backend(cfg: Config, name: str) -> BackendConfig:
     return cfg.backends[name]
 
 
+_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_SECRET_HEADER = re.compile(r"(?i)auth|key|token|secret|cookie")
+
+
+def _clean_key(value: str) -> str | None:
+    """One token on the first non-empty line; anything else is not a key."""
+    for line in value.splitlines():
+        line = line.strip()
+        if line:
+            return line if not any(ch.isspace() or ord(ch) < 32 for ch in line) else None
+    return None
+
+
 def resolve_api_key(bc: BackendConfig) -> str | None:
     """The backend's key from its env var or file, or None. Never log the result."""
-    if bc.api_key_env:
-        value = os.environ.get(bc.api_key_env, "").strip()
+    if bc.api_key_env and _ENV_NAME.match(bc.api_key_env):
+        value = _clean_key(os.environ.get(bc.api_key_env, ""))
         if value:
             return value
     if bc.api_key_file:
         path = Path(bc.api_key_file).expanduser()
         if path.is_file():
-            value = path.read_text(encoding="utf-8").strip()
+            value = _clean_key(path.read_text(encoding="utf-8"))
             if value:
                 return value
     return None
@@ -224,6 +241,10 @@ def redacted(cfg: Config) -> dict:
     """A copy safe to print: key sources are named, key material never appears."""
     out = to_dict(cfg)
     for b in out.get("backends", {}).values():
+        headers = b.get("extra_headers") or {}
+        b["extra_headers"] = {k: ("***" if _SECRET_HEADER.search(k) else v) for k, v in headers.items()}
+        if b.get("api_key_env") and not _ENV_NAME.match(b["api_key_env"]):
+            b["api_key_env"] = "<invalid: looks like a key, not a variable name>"
         if b.get("api_key_env"):
             b["api_key"] = "from env " + b["api_key_env"]
         elif b.get("api_key_file"):
@@ -245,6 +266,8 @@ def set_value(cfg: Config, dotted_key: str, raw_value: str) -> Config:
         value: object = json.loads(raw_value)
     except json.JSONDecodeError:
         value = raw_value
+    if dotted_key.endswith(".api_key_env") and isinstance(value, str) and value and not _ENV_NAME.match(value):
+        raise ValueError("api_key_env takes the NAME of an environment variable (for example ANTHROPIC_API_KEY), never the key itself; nothing was saved")
     data = to_dict(cfg)
     parts = dotted_key.split(".")
     node: dict = data

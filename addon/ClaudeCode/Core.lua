@@ -102,6 +102,7 @@ local counter = 0
 
 function CC:NewRequest(kind, sessionKey, project, backend, prompt)
 	counter = counter + 1
+	local data = self:GetData()
 	return {
 		id = string.format('%d-%04x-%d', time(), math.random(0, 65535), counter),
 		kind = kind,
@@ -110,6 +111,8 @@ function CC:NewRequest(kind, sessionKey, project, backend, prompt)
 		backend = backend or '',
 		prompt = prompt or '',
 		created_at = time(),
+		-- the companion's per-install token; the clipboard path requires it
+		nonce = (data and data.config and data.config.nonce) or '',
 	}
 end
 

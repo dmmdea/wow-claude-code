@@ -274,7 +274,11 @@ def cmd_config(args: argparse.Namespace) -> int:
             return 1
         return 0
     if args.config_command == "set":
-        cfg = cfgmod.set_value(cfg, args.key, args.value)
+        try:
+            cfg = cfgmod.set_value(cfg, args.key, args.value)
+        except ValueError as exc:
+            _say(f"refused: {exc}")
+            return 1
         cfgmod.save(cfg)
         for p in cfg.validate():
             _say(f"note: {p}")

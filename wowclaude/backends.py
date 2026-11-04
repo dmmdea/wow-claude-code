@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -182,7 +183,10 @@ class ClaudeCodeBackend:
     def describe(self) -> str:
         return f"claude-code (bin={self.bc.claude_bin}, permission_mode={self.bc.permission_mode})"
 
-    def build_argv(self, exe: str, prompt: str, resume_id: str | None) -> list[str]:
+    def build_argv(self, exe: str, resume_id: str | None) -> list[str]:
+        """The command line. The prompt is NOT part of it: it is written to the
+        child's stdin, so prompt text can never be parsed as an option and never
+        meets a shell (an npm ``claude.cmd`` shim runs through cmd.exe)."""
         bc = self.bc
         argv = [
             exe, "-p", "--output-format", "stream-json", "--verbose",
@@ -202,7 +206,6 @@ class ClaudeCodeBackend:
         if bc.system_prompt:
             argv += ["--append-system-prompt", bc.system_prompt]
         argv += list(bc.extra_args)
-        argv.append(prompt)
         return argv
 
     def run_turn(self, prompt: str, session: dict, project_dir: Path | None, on_event: EventSink, stop: threading.Event) -> TurnResult:
@@ -217,12 +220,12 @@ class ClaudeCodeBackend:
             on_event(TurnEvent("error", msg))
             return TurnResult(is_error=True, error=msg)
         resume_id = session.get("claude_session_id")
-        argv = self.build_argv(exe, prompt, resume_id)
+        argv = self.build_argv(exe, resume_id)
         started = time.time()
         try:
             proc = subprocess.Popen(
                 argv, cwd=cwd, env=_child_env(self.bc),
-                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, encoding="utf-8", errors="replace", creationflags=_popen_flags(),
             )
         except OSError as exc:
@@ -232,10 +235,24 @@ class ClaudeCodeBackend:
 
         stderr_chunks: list[str] = []
 
+        def feed_prompt() -> None:
+            assert proc.stdin is not None
+            try:
+                proc.stdin.write(prompt)
+            except (OSError, ValueError):
+                pass
+            finally:
+                try:
+                    proc.stdin.close()
+                except OSError:
+                    pass
+
         def drain_stderr() -> None:
             assert proc.stderr is not None
             for line in proc.stderr:
                 stderr_chunks.append(line)
+
+        threading.Thread(target=feed_prompt, daemon=True).start()
 
         def watch_stop() -> None:
             while proc.poll() is None:
@@ -354,25 +371,47 @@ def _sse_data_lines(resp) -> "iter[str]":  # type: ignore[valid-type]
             yield line[5:].strip()
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse redirects: urllib would replay the key headers to the new host."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
+        raise urllib.error.HTTPError(req.full_url, code, f"redirect refused (to {newurl}); set base_url to the final host", headers, fp)
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
 def _post(url: str, headers: dict[str, str], body: dict, timeout: float):
     req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), method="POST")
     for k, v in headers.items():
         req.add_header(k, v)
     req.add_header("Content-Type", "application/json")
     req.add_header("User-Agent", f"wowclaude/{__version__}")
-    return urllib.request.urlopen(req, timeout=timeout)
+    return _OPENER.open(req, timeout=timeout)
 
 
-def _http_error_text(exc: Exception) -> str:
+_BEARER = re.compile(r"(?i)(bearer\s+)\S+")
+_KEYISH = re.compile(r"\bsk-[A-Za-z0-9_\-]{8,}")
+
+
+def _scrub(text: str, key: str | None) -> str:
+    """Remove key material from text that may be logged or shown in the game."""
+    if key:
+        text = text.replace(key, "***")
+    text = _BEARER.sub(r"\1***", text)
+    return _KEYISH.sub("sk-***", text)
+
+
+def _http_error_text(exc: Exception, key: str | None = None) -> str:
     if isinstance(exc, urllib.error.HTTPError):
         try:
             body = exc.read().decode("utf-8", errors="replace")
         except Exception:  # noqa: BLE001 - best effort
             body = ""
-        return f"HTTP {exc.code}: {_truncate(body, 400) or exc.reason}"
+        return _scrub(f"HTTP {exc.code}: {_truncate(body, 400) or exc.reason}", key)
     if isinstance(exc, urllib.error.URLError):
-        return f"connection failed: {exc.reason}"
-    return f"{type(exc).__name__}: {exc}"
+        return _scrub(f"connection failed: {exc.reason}", key)
+    return _scrub(f"{type(exc).__name__}: {exc}", key)
 
 
 class _ChatBackendBase:
@@ -464,8 +503,10 @@ class OpenAIChatBackend(_ChatBackendBase):
                             break
         except Exception as exc:  # noqa: BLE001 - every failure becomes a result
             result.is_error = True
-            result.error = _http_error_text(exc)
+            result.error = _http_error_text(exc, key)
             on_event(TurnEvent("error", result.error))
+        if result.error:
+            result.error = _scrub(result.error, key)
         result.duration_ms = int((time.time() - started) * 1000)
         cost = result.usage.get("cost") if isinstance(result.usage, dict) else None
         if isinstance(cost, (int, float)):
@@ -533,8 +574,10 @@ class AnthropicBackend(_ChatBackendBase):
                         break
         except Exception as exc:  # noqa: BLE001
             result.is_error = True
-            result.error = _http_error_text(exc)
+            result.error = _http_error_text(exc, key)
             on_event(TurnEvent("error", result.error))
+        if result.error:
+            result.error = _scrub(result.error, key)
         result.duration_ms = int((time.time() - started) * 1000)
         reply = "".join(parts)
         on_event(TurnEvent("result", _truncate(reply, 200)))

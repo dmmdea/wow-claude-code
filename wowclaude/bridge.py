@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import threading
 import time
 from collections import deque
@@ -39,6 +40,8 @@ DATA_SCHEMA = 1
 DATA_BUDGET_BYTES = 1_000_000
 MAX_SESSIONS = 20
 MAX_ENTRY_CHARS = 12_000
+MAX_PROMPT_CHARS = 20_000
+MAX_REQUESTS_PER_SCAN = 20
 STREAM_FLUSH_SEC = 2.0
 REQUEST_KINDS = ("prompt", "stop", "new")
 
@@ -54,6 +57,7 @@ class Request:
     backend: str
     prompt: str
     created_at: int
+    nonce: str = ""
 
     @classmethod
     def from_record(cls, rec: dict) -> "Request | None":
@@ -62,14 +66,16 @@ class Request:
         if not isinstance(rid, str) or not rid or kind not in REQUEST_KINDS:
             return None
         prompt = rec.get("prompt", "")
+        prompt = prompt if isinstance(prompt, str) else str(prompt)
         return cls(
-            id=rid,
+            id=rid[:120],
             kind=kind,
-            session_key=str(rec.get("session_key") or ""),
-            project=str(rec.get("project") or ""),
-            backend=str(rec.get("backend") or ""),
-            prompt=prompt if isinstance(prompt, str) else str(prompt),
+            session_key=str(rec.get("session_key") or "")[:120],
+            project=str(rec.get("project") or "")[:120],
+            backend=str(rec.get("backend") or "")[:120],
+            prompt=prompt[:MAX_PROMPT_CHARS],
             created_at=int(rec.get("created_at") or 0),
+            nonce=str(rec.get("nonce") or ""),
         )
 
 
@@ -119,6 +125,7 @@ class Bridge:
         self._backends: dict[str, Backend] = {}
         self._last_flush = 0.0
         self._sv_mtimes: dict[str, float] = {}
+        self._sources: dict[str, str] = {}
 
     # ----------------------------------------------------------------- state
 
@@ -130,17 +137,33 @@ class Bridge:
                 if isinstance(data, dict):
                     data.setdefault("consumed", [])
                     data.setdefault("sessions", {})
+                    data.setdefault("nonce", secrets.token_hex(8))
                     return data
+                raise ValueError("not a JSON object")
             except (OSError, ValueError) as exc:
-                self.log(f"state file unreadable, starting fresh: {exc}")
-        return {"consumed": [], "sessions": {}}
+                # Keep the damaged file for inspection; never silently overwrite it.
+                bad = self.state_path.with_name(f"state.json.bad-{int(time.time())}")
+                try:
+                    os.replace(self.state_path, bad)
+                    self.log(f"state file unreadable ({exc}); moved to {bad.name} and starting fresh")
+                except OSError:
+                    self.log(f"state file unreadable ({exc}); starting fresh")
+        return {"consumed": [], "sessions": {}, "nonce": secrets.token_hex(8)}
 
     def save_state(self) -> None:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.state_path.with_suffix(".json.tmp")
         with tmp.open("w", encoding="utf-8") as fh:
             json.dump(self.state, fh, indent=1)
+            fh.flush()
+            os.fsync(fh.fileno())
         os.replace(tmp, self.state_path)
+
+    @property
+    def nonce(self) -> str:
+        """A per-install token the addon echoes in clipboard envelopes, so text
+        another process or a web page put on the clipboard is ignored."""
+        return str(self.state.get("nonce") or "")
 
     def consumed(self) -> set[str]:
         return set(self.state.get("consumed", []))
@@ -171,26 +194,37 @@ class Bridge:
                 self.log(f"skipping {path.name} this tick ({exc})")
                 continue
             self._sv_mtimes[key] = mtime
-            found.extend(parse_requests(saved))
+            requests = parse_requests(saved)
+            if len(requests) > MAX_REQUESTS_PER_SCAN:
+                self.log(f"{path.name}: {len(requests)} requests in the outbox; taking the oldest {MAX_REQUESTS_PER_SCAN} this tick")
+                requests = requests[:MAX_REQUESTS_PER_SCAN]
+            for req in requests:
+                req_source = path.parent.parent.name
+                self._sources[req.id] = req_source
+            found.extend(requests)
         return found
 
-    def submit(self, req: Request) -> bool:
+    def submit(self, req: Request, source: str = "") -> bool:
         """Queue a request unless it was consumed or queued already."""
         if req.id in self.consumed() or any(q.id == req.id for q in self.queue) or (self.current and self.current.id == req.id):
             return False
+        source = source or self._sources.get(req.id, "saved variables")
         if req.kind == "stop":
             self._handle_stop(req)
             return True
         self.queue.append(req)
-        self.log(f"queued {req.kind} {req.id} (session {req.session_key or '-'}, backend {req.backend or 'default'}, project {req.project or 'default'})")
+        head = req.prompt.strip().replace("\n", " ")[:200]
+        self.log(f"queued {req.kind} {req.id} from {source} (session {req.session_key or '-'}, backend {req.backend or 'default'}, project {req.project or 'default'}): {head}")
         return True
 
     def submit_envelope(self, text: str) -> bool:
         req = parse_envelope(text)
         if not req:
             return False
-        self.log(f"clipboard envelope for {req.kind} {req.id}")
-        return self.submit(req)
+        if not self.nonce or req.nonce != self.nonce:
+            self.log(f"clipboard envelope {req.id} ignored: it does not carry this companion's nonce (press Refresh in the game once, then copy again)")
+            return False
+        return self.submit(req, source="clipboard")
 
     def _mark_consumed(self, rid: str) -> None:
         consumed = self.state.setdefault("consumed", [])
@@ -221,11 +255,14 @@ class Bridge:
         req = self.queue.popleft()
         self.current = req
         self.stop_event.clear()
+        # At most once: a request is consumed before it runs, so a crash or a
+        # kill during the run never replays an agentic session on restart.
+        self._mark_consumed(req.id)
+        self.save_state()
         try:
             self._run(req)
         finally:
             self.current = None
-            self._mark_consumed(req.id)
             self.save_state()
             self.write_data_file()
         return True
@@ -355,6 +392,7 @@ class Bridge:
                 "backends": sorted(self.cfg.backends),
                 "default_backend": self.cfg.default_backend,
                 "clipboard_watch": bool(self.cfg.clipboard_watch),
+                "nonce": self.nonce,
                 "running": self.current.id if self.current else "",
                 "queued": self.pending(),
             },

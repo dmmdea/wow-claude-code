@@ -22,6 +22,7 @@ ClaudeCodeDB = {
 			["backend"] = "claude-code",        -- a backend name from the companion config
 			["prompt"] = "line one\nline two",
 			["created_at"] = 1762300000,
+			["nonce"] = "3f9a1c2e7b4d8e10",   -- the companion's token from the data file, or ""
 		}, -- [1]
 	},
 	["settings"] = { ... },                       -- window settings, companion ignores them
@@ -48,7 +49,10 @@ as `|`, so an envelope never contains a pipe character.
 CLAUDECODE-WOW:1:{"backend":"claude-code","created_at":1762300000,"id":"1762300000-1a2b-1","kind":"new","project":"myproject","prompt":"hello","session_key":"s-1762300000"}
 ```
 
-The companion dedupes by id, so a request that arrives both ways runs once.
+The companion dedupes by id, so a request that arrives both ways runs once. An envelope is
+accepted only when its `nonce` matches the one the companion published in the data file, so
+text that some other process or a web page put on the clipboard is ignored. A request is
+marked consumed before it runs: if the companion dies mid-turn, the request is not replayed.
 
 ## Companion -> game: `ClaudeCode_Data`
 
@@ -68,6 +72,7 @@ ClaudeCode_Data = {
 		["backends"] = { "claude-code", -- [1] },
 		["default_backend"] = "claude-code",
 		["clipboard_watch"] = false,
+		["nonce"] = "3f9a1c2e7b4d8e10",       -- echoed by the addon in every request
 		["running"] = "",                     -- id of the request being worked, or ""
 		["queued"] = 0,
 	},
