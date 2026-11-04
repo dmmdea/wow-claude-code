@@ -17,7 +17,7 @@ claude -p --output-format stream-json --verbose --permission-mode <mode> --permi
 |---|---|---|
 | `claude_bin` | `claude` | name on PATH or an absolute path |
 | `permission_mode` | `acceptEdits` | `default`, `acceptEdits`, `plan`, `bypassPermissions`, ...; print mode denies anything that would prompt |
-| `allowed_tools` | `[]` | e.g. `["Bash(git status:*)", "Bash(npm test:*)"]` |
+| `allowed_tools` | `[]` | permission rules, e.g. `["Bash(git status *)", "Bash(npm test *)"]` |
 | `max_budget_usd` | `5.0` | passed only when an API key is in use |
 | `model` | the CLI's default | alias or full id |
 | `system_prompt` | none | appended to the CLI's system prompt |
@@ -26,6 +26,14 @@ claude -p --output-format stream-json --verbose --permission-mode <mode> --permi
 
 The companion removes its own session markers from the child environment so the CLI never
 believes it is a nested session.
+
+Stop terminates the child process. The in-flight turn ends without a result; the session stays
+resumable, so the next prompt on the same session continues from the last completed turn.
+
+The companion never logs you in and never touches your Claude credentials: it runs your own
+installed CLI, which authenticates the way you set it up (`claude auth status` shows which).
+Anthropic requires API keys for products built on Claude Code; if you build a hosted service
+on top of this companion, configure `api_key_env` rather than relying on a subscription login.
 
 ## openai
 
