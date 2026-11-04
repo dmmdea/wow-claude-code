@@ -26,6 +26,16 @@ A request leaves the game when the UI reloads (Send does that for you), and the 
 back on the next reload (press Refresh). Optionally, with the clipboard watcher turned on, a
 request can also leave the game with a single Ctrl+C and no reload.
 
+**Status:** 0.1.0, first release. The companion, its three backends and both file formats are
+exercised by real runs on Windows; the in-game window is new. Please report what breaks in
+[Issues](https://github.com/dmmdea/wow-claude-code/issues).
+
+## Screenshots
+
+`doctor` after a fresh install, then the companion's banner:
+
+![wowclaude doctor and run in a terminal](docs/img/doctor.png)
+
 ## What you need
 
 - World of Warcraft: Forever, retail, or Classic Era (Windows or macOS).
@@ -66,6 +76,10 @@ request can also leave the game with a single Ctrl+C and no reload.
 
 Prefer a command on your PATH? `pipx install .` or `uv tool install .` from the repository folder
 gives you `wowclaude` instead of `python -m wowclaude`.
+
+**Update:** pull (or download) the new version and run `python -m wowclaude install` again; the
+companion's data file is kept. **Uninstall:** `python -m wowclaude uninstall` removes exactly
+the two addon folders; delete `~/.wowclaude` yourself if you want the config and state gone too.
 
 ## In the game
 
@@ -181,6 +195,13 @@ Everything here is designed around not giving Blizzard any reason to look at you
 
 Layout: `addon/ClaudeCode` (the window), `addon/ClaudeCode_Data` (the bridge file the companion
 writes), `wowclaude/` (the companion), `docs/` (architecture, protocol, backends, safety).
+
+More detail: [architecture](docs/architecture.md), [bridge protocol](docs/bridge-protocol.md),
+[backends](docs/backends.md), [safety and the game's rules](docs/safety.md),
+[changelog](CHANGELOG.md).
+
+Issues and pull requests are welcome. Before a PR, run the luacheck and `lua_smoke` checks above
+and `python -m wowclaude selfcheck`; CI runs the same three.
 
 ## Not affiliated
 
