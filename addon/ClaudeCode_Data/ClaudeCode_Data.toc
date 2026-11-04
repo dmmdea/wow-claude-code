@@ -1,0 +1,11 @@
+## Interface: 16001, 120107, 11509
+## Title: Claude Code Data
+## Notes: Bridge file written by the wowclaude companion. Do not edit by hand; press Refresh in the Claude Code window (or /reload) to pick up new content.
+## Author: dmmdea
+## Version: 0.1.0
+## IconTexture: Interface\Icons\INV_Misc_Note_01
+## Category: Development
+## X-Website: https://github.com/dmmdea/wow-claude-code
+## X-License: Apache-2.0
+
+ClaudeCode_Data.lua

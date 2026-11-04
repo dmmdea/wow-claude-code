@@ -1,0 +1,38 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "wowclaude"
+dynamic = ["version"]
+description = "Companion for the ClaudeCode World of Warcraft addon: runs Claude Code or any OpenAI-compatible endpoint from an in-game window over the SavedVariables bridge."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+authors = [{ name = "dmmdea" }]
+keywords = ["world-of-warcraft", "wow", "addon", "claude-code", "openrouter", "llm"]
+classifiers = [
+  "Environment :: Console",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Topic :: Games/Entertainment",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/dmmdea/wow-claude-code"
+Issues = "https://github.com/dmmdea/wow-claude-code/issues"
+
+[project.scripts]
+wowclaude = "wowclaude.cli:main"
+
+[tool.hatch.version]
+path = "wowclaude/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["wowclaude"]
+
+# The two addon folders travel inside the wheel so `wowclaude install` works
+# from a pipx/uv install as well as from a bare download of the repo.
+[tool.hatch.build.targets.wheel.force-include]
+"addon" = "wowclaude/_addon"
