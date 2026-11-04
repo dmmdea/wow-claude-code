@@ -39,6 +39,7 @@ read_globals = {
 	"GameFontHighlightSmall",
 	"ChatFontNormal",
 	"GameTooltip",
+	"Minimap",
 	-- client functions
 	"ReloadUI",
 	"InCombatLockdown",

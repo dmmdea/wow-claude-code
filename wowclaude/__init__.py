@@ -7,4 +7,4 @@ Anthropic Messages API) and writes the results into the ClaudeCode_Data addon,
 which the game picks up on /reload. It never touches the game process.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"

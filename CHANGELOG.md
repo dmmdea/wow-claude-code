@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.1 (2026-11-04)
+
+- The addon is visible without knowing the slash command: a chat line at login (and the first
+  time it ever runs) says how to open the window, and a minimap button toggles it. Drag the
+  button to move it; `/claude minimap` hides it and `/claude minimap reset` puts it back.
+- A part of the window that fails to build is reported in chat and by `/claude status` instead
+  of failing silently.
+- A click anywhere in the prompt area focuses the prompt.
+
 ## 0.1.0 (2026-11-04)
 
 First release.

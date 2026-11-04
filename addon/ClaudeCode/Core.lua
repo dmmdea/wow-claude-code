@@ -20,11 +20,13 @@ CC.VERSION = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetada
 local DEFAULTS = {
 	version = 1,
 	outbox = {},
+	intro_seen = false,         -- the one-time "how to open me" chat line was shown
 	settings = {
 		auto_reload = true,     -- Send reloads the UI right away so the request leaves the game
 		send_mode = 'auto',     -- auto | reload | clipboard
 		width = 720,
 		height = 500,
+		minimap = true,         -- show the minimap button
 	},
 	ui = {
 		session = nil,
@@ -289,11 +291,26 @@ local function slashHandler(input)
 		CC:SendStop()
 	elseif command == 'reload' or command == 'refresh' then
 		CC:Reload()
+	elseif command == 'minimap' then
+		if rest == 'reset' then
+			CC.ui.minimap_point = nil
+			CC.db.settings.minimap = true
+		else
+			CC.db.settings.minimap = not CC.db.settings.minimap
+		end
+		if CC.PlaceMinimapButton then
+			CC:PlaceMinimapButton()
+		end
+		CC:Print(CC.db.settings.minimap and 'minimap button shown. Drag it to move it; /claude minimap reset puts it back.'
+			or 'minimap button hidden; /claude minimap shows it again.')
 	elseif command == 'status' then
 		local age = CC:DataAge()
 		CC:Print(string.format('version %s, %d queued request(s), companion data %s', CC.VERSION, CC:PendingCount(), age and (age .. 's old') or 'missing'))
+		if CC.loadError then
+			CC:Print(CC.loadError)
+		end
 	else
-		CC:Print('commands: /claude [toggle|send <prompt>|copy <prompt>|new|stop|reload|status]')
+		CC:Print('commands: /claude [toggle|send <prompt>|copy <prompt>|new|stop|reload|status|minimap [reset]]')
 	end
 end
 
@@ -316,19 +333,53 @@ end
 
 -- ------------------------------------------------------------------- loading
 
+--- Build one part of the UI. The client hides Lua errors unless scriptErrors
+--- is on, so a failure is kept and shown in chat instead of vanishing.
+local function build(what, method)
+	if not CC[method] then
+		return true
+	end
+	local ok, err = pcall(CC[method], CC)
+	if not ok then
+		local line = string.format('%s failed to build: %s', what, tostring(err))
+		CC.loadError = CC.loadError and (CC.loadError .. ' / ' .. line) or line
+		if geterrorhandler then
+			geterrorhandler()(err)
+		end
+	end
+	return ok
+end
+
 local loader = CreateFrame('Frame')
 loader:RegisterEvent('ADDON_LOADED')
-loader:SetScript('OnEvent', function(self, event, name)
-	if event ~= 'ADDON_LOADED' or name ~= ADDON_NAME then
-		return
-	end
-	self:UnregisterEvent('ADDON_LOADED')
-	CC:InitDB()
-	local removed = CC:PruneConsumed(CC:GetData())
-	if CC.CreateUI then
-		CC:CreateUI()
-	end
-	if removed > 0 then
-		CC:Print(string.format('%d request(s) picked up by the companion.', removed))
+loader:RegisterEvent('PLAYER_ENTERING_WORLD')
+loader:SetScript('OnEvent', function(self, event, arg1, arg2)
+	if event == 'ADDON_LOADED' then
+		if arg1 ~= ADDON_NAME then
+			return
+		end
+		self:UnregisterEvent('ADDON_LOADED')
+		CC:InitDB()
+		local removed = CC:PruneConsumed(CC:GetData())
+		build('the minimap button', 'CreateMinimapButton')
+		CC.windowBroken = not build('the window', 'CreateUI')
+		if removed > 0 then
+			CC:Print(string.format('%d request(s) picked up by the companion.', removed))
+		end
+	elseif event == 'PLAYER_ENTERING_WORLD' then
+		-- Only the first one after the UI loads: arg1 is isInitialLogin, arg2 is
+		-- isReloadingUi. Say how to open the window at login and the first time
+		-- the addon ever runs; stay quiet on the reloads Send and Refresh cause.
+		self:UnregisterEvent('PLAYER_ENTERING_WORLD')
+		if not CC.db then
+			return
+		end
+		if CC.loadError then
+			CC:Print(CC.loadError)
+		elseif not arg2 or not CC.db.intro_seen then
+			CC.db.intro_seen = true
+			CC:Print(string.format('v%s ready. Type /claude%s to open the window.', CC.VERSION,
+				CC.db.settings.minimap and ' or click the minimap button' or ''))
+		end
 	end
 end)

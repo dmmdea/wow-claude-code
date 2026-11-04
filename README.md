@@ -26,7 +26,7 @@ A request leaves the game when the UI reloads (Send does that for you), and the 
 back on the next reload (press Refresh). Optionally, with the clipboard watcher turned on, a
 request can also leave the game with a single Ctrl+C and no reload.
 
-**Status:** 0.1.0, first release. The companion, its three backends and both file formats are
+**Status:** 0.1.1, early release. The companion, its three backends and both file formats are
 exercised by real runs on Windows; the in-game window is new. Please report what breaks in
 [Issues](https://github.com/dmmdea/wow-claude-code/issues).
 
@@ -83,8 +83,10 @@ the two addon folders; delete `~/.wowclaude` yourself if you want the config and
 
 ## In the game
 
-- `/claude` (or `/cc`) toggles the window. There is also a keybinding under *Options > Keybindings > AddOns*
-  and an entry in the addon compartment (the puzzle-piece menu by the minimap).
+- When you log in, the addon says in chat how to open it, and it puts a small note-icon button on
+  the minimap. Click the button, or type `/claude` (or `/cc`), to toggle the window. There is also
+  a keybinding under *Options > Keybindings > AddOns* and an entry in the addon compartment (the
+  puzzle-piece menu by the minimap). Drag the button to move it; `/claude minimap` hides it.
 - Pick a **Project** (a folder on your PC for Claude Code sessions) and a **Backend**, type a
   prompt, press **Send**. Send stores the request and reloads the UI so it reaches the companion.
 - Press **Refresh** whenever you want to read what the companion has written so far. Your PC also
@@ -94,7 +96,7 @@ the two addon folders; delete `~/.wowclaude` yourself if you want the config and
 - **Stop** asks the companion to end the running turn. **Copy** puts the request on your clipboard
   as a single line for the clipboard watcher (see below).
 - Slash commands: `/claude send <prompt>`, `/claude copy <prompt>`, `/claude new`, `/claude stop`,
-  `/claude reload`, `/claude status`.
+  `/claude reload`, `/claude status`, `/claude minimap` (`/claude minimap reset` puts the button back).
 
 ## Backends
 
@@ -175,6 +177,12 @@ Everything here is designed around not giving Blizzard any reason to look at you
 
 ## Troubleshooting
 
+- *Nothing shows in the game*: type `/claude status`. An answer with a version means the addon
+  is loaded, and `/claude` opens the window. If the game does not know the command, the addon did
+  not load: check that both entries are ticked in the AddOns list, and restart the game if you
+  installed while it was running.
+- *The addon says a part "failed to build"*: that line is the Lua error. Please open an issue
+  with it.
 - *The window says "no companion data yet"*: run `python -m wowclaude run`, then press Refresh.
 - *A request never leaves the game*: Send needs the reload to go through; in combat the client
   does not reload, so press Refresh after the fight. `doctor` shows how many requests are waiting.
