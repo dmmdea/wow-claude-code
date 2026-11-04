@@ -61,6 +61,8 @@ CreateFrame = function(kind, name, parent, template)
     return w
 end
 UIParent = newWidget('Frame', 'UIParent')
+Minimap = newWidget('Minimap', 'Minimap')
+geterrorhandler = function() return function(e) error(e, 0) end end
 GameTooltip = newWidget('GameTooltip', 'GameTooltip')
 DEFAULT_CHAT_FRAME = newWidget('MessageFrame', 'DEFAULT_CHAT_FRAME')
 UISpecialFrames = {}
@@ -91,7 +93,26 @@ for _, f in ipairs(frames) do
     if h then h(f, 'ADDON_LOADED', 'ClaudeCode') end
 end
 assert(ClaudeCode.db == ClaudeCodeDB, 'db not initialised')
+assert(not ClaudeCode.loadError, ClaudeCode.loadError)
 assert(ClaudeCode.frame, 'UI frame not created')
+assert(ClaudeCode.minimapButton and ClaudeCode.minimapButton.shown, 'minimap button not shown')
+
+-- the first run arrives as a reload: the intro prints once, then reloads stay quiet
+local function enterWorld(isLogin, isReload)
+    local before = #calls.messages
+    for _, f in ipairs(frames) do
+        local h = f.scripts and f.scripts.OnEvent
+        if h then h(f, 'PLAYER_ENTERING_WORLD', isLogin, isReload) end
+    end
+    return #calls.messages - before
+end
+assert(enterWorld(false, true) == 1 and ClaudeCodeDB.intro_seen, 'intro line not printed on the first run')
+assert(enterWorld(false, true) == 0, 'a reload must stay quiet')
+assert(enterWorld(true, false) == 1, 'a login must print the intro')
+SlashCmdList.CLAUDECODE('minimap')
+assert(not ClaudeCode.minimapButton.shown, 'minimap toggle did not hide the button')
+SlashCmdList.CLAUDECODE('minimap reset')
+assert(ClaudeCode.minimapButton.shown, 'minimap reset did not show the button')
 
 -- companion data present: one consumed id, one session, clipboard on
 local stale = ClaudeCode:NewRequest('prompt', 's-1', 'demo', 'claude-code', 'old one')

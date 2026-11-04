@@ -193,6 +193,11 @@ function CC:CreateUI()
 	end)
 	promptScroll:SetScrollChild(prompt)
 	self.promptBox = prompt
+	-- an empty multi-line box is only one line tall; a click anywhere in the area focuses it
+	promptScroll:EnableMouse(true)
+	promptScroll:SetScript('OnMouseDown', function()
+		prompt:SetFocus()
+	end)
 	local hint = f:CreateFontString(nil, 'OVERLAY', 'GameFontHighlightSmall')
 	hint:SetPoint('BOTTOMLEFT', promptScroll, 'TOPLEFT', 0, 2)
 	hint:SetText('|cff9d9d9dPrompt (Ctrl+Enter sends)|r')
@@ -389,7 +394,88 @@ function CC:Render()
 		mode == 'clipboard' and 'clipboard (Ctrl+C)' or 'reload'))
 end
 
+-- ------------------------------------------------------------ minimap button
+
+--- A small round button on the minimap, so the addon is visible without
+--- knowing the slash command. A click toggles the window; a drag moves the
+--- button anywhere on screen. No library and no OnUpdate: the client's own
+--- frame dragging moves it.
+function CC:CreateMinimapButton()
+	if self.minimapButton or not Minimap then
+		return self.minimapButton
+	end
+	local b = CreateFrame('Button', 'ClaudeCodeMinimapButton', Minimap)
+	self.minimapButton = b
+	b:SetSize(31, 31)
+	b:SetFrameStrata('MEDIUM')
+	b:SetFrameLevel(8)
+	b:SetMovable(true)
+	b:SetClampedToScreen(true)
+	b:RegisterForClicks('AnyUp')
+	b:RegisterForDrag('LeftButton')
+	b:SetHighlightTexture('Interface\\Minimap\\UI-Minimap-ZoomButton-Highlight')
+	local background = b:CreateTexture(nil, 'BACKGROUND')
+	background:SetTexture('Interface\\Minimap\\UI-Minimap-Background')
+	background:SetSize(20, 20)
+	background:SetPoint('TOPLEFT', 7, -5)
+	local icon = b:CreateTexture(nil, 'ARTWORK')
+	icon:SetTexture('Interface\\Icons\\INV_Misc_Note_01')
+	icon:SetTexCoord(0.05, 0.95, 0.05, 0.95)
+	icon:SetSize(17, 17)
+	icon:SetPoint('TOPLEFT', 7, -6)
+	local border = b:CreateTexture(nil, 'OVERLAY')
+	border:SetTexture('Interface\\Minimap\\MiniMap-TrackingBorder')
+	border:SetSize(53, 53)
+	border:SetPoint('TOPLEFT')
+	b:SetScript('OnClick', function()
+		self:Toggle()
+	end)
+	b:SetScript('OnDragStart', b.StartMoving)
+	b:SetScript('OnDragStop', function(button)
+		button:StopMovingOrSizing()
+		local point, _, relPoint, x, y = button:GetPoint()
+		self.ui.minimap_point = { point, relPoint, x, y }
+	end)
+	b:SetScript('OnEnter', function(button)
+		GameTooltip:SetOwner(button, 'ANCHOR_LEFT')
+		GameTooltip:SetText('Claude Code', 1, 0.82, 0)
+		GameTooltip:AddLine('Click to open or close the window.', 1, 1, 1)
+		GameTooltip:AddLine('Drag to move this button. /claude minimap hides it.', 0.6, 0.6, 0.6)
+		GameTooltip:Show()
+	end)
+	b:SetScript('OnLeave', function()
+		GameTooltip:Hide()
+	end)
+	self:PlaceMinimapButton()
+	return b
+end
+
+--- Put the button where the player left it (or at the left edge of the
+--- minimap) and show or hide it by the setting.
+function CC:PlaceMinimapButton()
+	local b = self.minimapButton
+	if not b then
+		return
+	end
+	b:ClearAllPoints()
+	local p = self.ui.minimap_point
+	if type(p) == 'table' and p[1] then
+		b:SetPoint(p[1], UIParent, p[2] or p[1], p[3] or 0, p[4] or 0)
+	else
+		b:SetPoint('CENTER', Minimap, 'LEFT', -2, -22)
+	end
+	if self.db.settings.minimap then
+		b:Show()
+	else
+		b:Hide()
+	end
+end
+
 function CC:Toggle()
+	if self.windowBroken then
+		self:Print(self.loadError or 'the window failed to build.')
+		return
+	end
 	if not self.frame then
 		return
 	end
