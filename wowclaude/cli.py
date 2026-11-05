@@ -172,6 +172,34 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
 
 # ------------------------------------------------------------------------- run
 
+def _hold_run_lock():
+    """Take the lock that keeps a second companion from starting.
+
+    Two companions on one config folder would each run every request (twice the
+    usage, two sessions editing the same project) and overwrite each other's
+    data file. The lock is an operating-system file lock on ``companion.lock``
+    in the config folder, so it ends with the process however the process ends.
+    Returns the open file, to be kept for the life of the run, or None when
+    another companion holds the lock."""
+    path = cfgmod.home() / "companion.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(path, "a+b")  # noqa: SIM115 - stays open on purpose
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return None
+    return handle
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     cfg = cfgmod.load()
     problems = cfg.validate()
@@ -182,6 +210,10 @@ def cmd_run(args: argparse.Namespace) -> int:
     status = installed_status(cfg)
     if not all(status.values()):
         _say("the addon folders are not installed in this flavor; run `python -m wowclaude install` first")
+        return 1
+    run_lock = _hold_run_lock()
+    if run_lock is None:
+        _say("another companion is already running with this config folder; stop it first, because two would run every request twice")
         return 1
 
     bridge = Bridge(cfg, log=_stamp, notify=notify if cfg.toast and notify_available() else None)
@@ -229,6 +261,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         if watcher:
             watcher.stop()
         bridge.write_data_file()
+        run_lock.close()
     return 0
 
 

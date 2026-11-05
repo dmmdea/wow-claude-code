@@ -160,6 +160,8 @@ reloads the UI, as in 0.1.
 - HTTP backends refuse redirects (a redirect would otherwise carry the key to another host), and
   key material is scrubbed from error text before it reaches the log, the data file or a toast.
 - A request is marked consumed before it runs, so a crash never replays an agentic session.
+- Only one companion runs per config folder. `run` holds an operating-system lock on
+  `companion.lock` there, and a second `run` stops instead of running every request a second time.
 - `config set` refuses an `api_key_env` value that looks like a key instead of a variable name,
   and `config show` masks header values whose names look secret.
 - `uninstall` removes the two addon folders and only the live slot folders `install` created, which

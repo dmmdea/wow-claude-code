@@ -32,7 +32,7 @@ file from disk at that moment, and the answer appears in the window with no relo
 have a fallback: with the clipboard path off, a send reloads the UI as in 0.1; when the live checks
 run out, the Refresh button becomes Reload UI.
 
-**Status:** 0.2.0, early release. The companion, its three backends and the file formats are
+**Status:** 0.2.1, early release. The companion, its three backends and the file formats are
 exercised by real runs on Windows. The window and the live channel are new in this release.
 Please report what breaks in [Issues](https://github.com/dmmdea/wow-claude-code/issues).
 
@@ -100,6 +100,9 @@ a few more lines):
    ```
    python -m wowclaude run
    ```
+
+   One companion at a time: a second `run` stops with a message instead of answering every
+   request twice.
 
 Prefer a command on your PATH? `pipx install .` or `uv tool install .` from the repository folder
 gives you `wowclaude` instead of `python -m wowclaude`.
@@ -332,6 +335,8 @@ none of it is a promise that the game's rules allow it:
   for you. Open a terminal in the repository folder and run `python -m wowclaude run` (or
   `wowclaude run` if you installed it with `pipx` or `uv`). To start it at login, add that command
   to your system's own startup items.
+- *`run` says "another companion is already running"*: one is, possibly in a window you forgot or
+  started hidden. Use that one, or stop it first; the lock goes away with its process.
 - *`claude` not found*: install the Claude Code CLI, or set `backends.claude-code.claude_bin` to
   its full path.
 - *Tool calls are denied*: print mode cannot ask you for permission. Raise `permission_mode`, add

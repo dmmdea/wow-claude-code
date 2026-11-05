@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.1 (2026-11-04)
+
+- One companion at a time. `run` takes a lock in the config folder and a second `run` stops with
+  "another companion is already running". Two companions would each run every request, which
+  doubles the usage and puts two sessions to work in the same project folder. The lock ends with
+  its process, so nothing has to be cleaned up after a crash.
+
 ## 0.2.0 (2026-11-04)
 
 - Answers arrive without a reload. `install` now also creates live slot folders beside the two
