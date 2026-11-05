@@ -8,4 +8,4 @@ and the live slot addons, which the game reads through its own addon loader.
 It never touches the game process.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
