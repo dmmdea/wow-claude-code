@@ -1,17 +1,33 @@
-"""Install and remove the two addon folders.
+"""Install and remove the addon folders.
 
-The only places this module ever writes are ``<flavor>/Interface/AddOns/ClaudeCode``
-and ``<flavor>/Interface/AddOns/ClaudeCode_Data``. Any other destination is refused.
+The only places this module ever writes are, under ``<flavor>/Interface/AddOns``:
+``ClaudeCode``, ``ClaudeCode_Data`` and the live slot folders ``ClaudeCode_Live001``,
+``ClaudeCode_Live002``, ... Any other destination is refused, and a folder is only
+removed when this module created it.
 """
 
 from __future__ import annotations
 
+import re
 import shutil
 from pathlib import Path
 
 from wowclaude import config as cfgmod
 
 ADDON_FOLDERS = (cfgmod.UI_ADDON, cfgmod.DATA_ADDON)
+
+# Live slots: load-on-demand addons that carry answers into a running game.
+# The client reads a load-on-demand addon's file when the addon is loaded, and
+# an addon loads once per UI session, so there is a pool of them. The client
+# lists addon folders when it starts and on a /reload, so the folders have to
+# exist before one of those; the companion only ever rewrites the one file
+# inside each.
+LIVE_PREFIX = "ClaudeCode_Live"
+LIVE_FILE = "Live.lua"
+LIVE_GLOBAL = "ClaudeCode_Live"
+LIVE_MARKER = "## X-ClaudeCode-Live: 1"
+MAX_LIVE_SLOTS = 400
+_LIVE_NAME = re.compile(r"^ClaudeCode_Live\d{3}$")
 
 
 def addon_source_dir() -> Path:
@@ -55,9 +71,94 @@ def install_addons(cfg: cfgmod.Config) -> list[Path]:
     return written
 
 
+# ------------------------------------------------------------------ live slots
+
+def live_slot_name(index: int) -> str:
+    return f"{LIVE_PREFIX}{index:03d}"
+
+
+def _interface_line(source: Path) -> str:
+    """The ``## Interface:`` line of the window addon, so every slot matches it."""
+    toc = source / cfgmod.UI_ADDON / f"{cfgmod.UI_ADDON}.toc"
+    for line in toc.read_text(encoding="utf-8").splitlines():
+        if line.startswith("## Interface:"):
+            return line.strip()
+    raise ValueError(f"no ## Interface line in {toc}")
+
+
+def live_slot_toc(index: int, interface_line: str) -> str:
+    return "\n".join([
+        interface_line,
+        f"## Title: Claude Code live slot {index:03d}",
+        "## Notes: Carries the companion's answers into the game without a reload. Claude Code loads it on demand; leave it enabled.",
+        "## Author: dmmdea",
+        "## LoadOnDemand: 1",
+        f"## Dependencies: {cfgmod.UI_ADDON}",
+        f"## Group: {cfgmod.UI_ADDON}",
+        "## IconTexture: Interface\\Icons\\INV_Misc_Note_01",
+        LIVE_MARKER,
+        "",
+        LIVE_FILE,
+        "",
+    ])
+
+
+def _is_live_slot(folder: Path) -> bool:
+    """True for a folder this module created: the name pattern and our TOC marker."""
+    if not folder.is_dir() or not _LIVE_NAME.match(folder.name):
+        return False
+    try:
+        return LIVE_MARKER in (folder / f"{folder.name}.toc").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+
+
+def installed_live_slots(cfg: cfgmod.Config) -> list[Path]:
+    """The live slot folders present in the game's AddOns folder, in order."""
+    target = cfgmod.addons_dir(cfg)
+    if not target.is_dir():
+        return []
+    return sorted(p for p in target.glob(f"{LIVE_PREFIX}[0-9][0-9][0-9]") if _is_live_slot(p))
+
+
+def install_live_slots(cfg: cfgmod.Config) -> tuple[int, int]:
+    """Create ``cfg.live_slots`` slot folders and remove surplus ones.
+
+    Returns ``(present, removed)``. Idempotent: an existing slot keeps its
+    ``Live.lua``, which may hold an answer the game has not read yet.
+    """
+    target = _checked_addons_dir(cfg)
+    want = max(0, min(int(cfg.live_slots), MAX_LIVE_SLOTS))
+    interface_line = _interface_line(addon_source_dir()) if want else ""
+    for index in range(1, want + 1):
+        folder = target / live_slot_name(index)
+        if folder.exists() and not _is_live_slot(folder) and any(folder.iterdir()):
+            raise ValueError(f"refusing to reuse {folder}: it exists and was not created by wowclaude")
+        folder.mkdir(exist_ok=True)
+        toc = folder / f"{folder.name}.toc"
+        text = live_slot_toc(index, interface_line)
+        if not toc.is_file() or toc.read_text(encoding="utf-8", errors="replace") != text:
+            toc.write_text(text, encoding="utf-8", newline="\n")
+        live = folder / LIVE_FILE
+        if not live.is_file():
+            live.write_text(f"{LIVE_GLOBAL} = nil\n", encoding="utf-8", newline="\n")
+    removed = 0
+    for folder in installed_live_slots(cfg):
+        if int(folder.name[-3:]) > want:
+            shutil.rmtree(folder)
+            removed += 1
+    return want, removed
+
+
+# ------------------------------------------------------------------- uninstall
+
 def uninstall_addons(cfg: cfgmod.Config) -> list[Path]:
+    """Remove the two addon folders and every live slot folder this module created."""
     target = _checked_addons_dir(cfg)
     removed: list[Path] = []
+    for folder in installed_live_slots(cfg):
+        shutil.rmtree(folder)
+        removed.append(folder)
     for name in ADDON_FOLDERS:
         dst = target / name
         if dst.is_dir():

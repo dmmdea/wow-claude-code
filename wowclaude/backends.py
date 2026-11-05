@@ -134,6 +134,8 @@ def _child_env(bc: BackendConfig) -> dict[str, str]:
     env = dict(os.environ)
     for marker in _NESTED_SESSION_MARKERS:
         env.pop(marker, None)
+    for name, value in (bc.env or {}).items():
+        env[name] = os.path.expandvars(os.path.expanduser(value))
     key = resolve_api_key(bc)
     if key:
         env["ANTHROPIC_API_KEY"] = key
@@ -173,6 +175,18 @@ def claude_auth_summary(bc: BackendConfig) -> str:
     if info.get("loggedIn"):
         return f"CLI login ({info.get('authMethod', 'unknown method')})"
     return "no key configured and the CLI is not logged in (run: claude, then /login)"
+
+
+def claude_live_check(name: str, bc: BackendConfig) -> tuple[bool, str]:
+    """Run one tiny real turn through the CLI exactly as the companion would.
+
+    `claude auth status` can report a login whose session has expired; only a
+    real turn proves the CLI can answer. Returns (ok, answer or error text)."""
+    backend = ClaudeCodeBackend(name, bc)
+    result = backend.run_turn("Reply with the single word: ok", {}, None, lambda ev: None, threading.Event())
+    if result.is_error:
+        return False, _truncate(result.error or result.text or "error", 200)
+    return True, _truncate(result.text or "(empty answer)", 80)
 
 
 class ClaudeCodeBackend:

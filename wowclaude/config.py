@@ -56,6 +56,9 @@ class BackendConfig:
     allowed_tools: list[str] = field(default_factory=list)
     max_budget_usd: float | None = 5.0
     extra_args: list[str] = field(default_factory=list)
+    # Extra environment variables for the CLI child, for example the folder a
+    # non-default Claude Code login lives in. Never credentials.
+    env: dict[str, str] = field(default_factory=dict)
     # openai / anthropic
     base_url: str | None = None
     max_history_messages: int = 40
@@ -74,6 +77,14 @@ class BackendConfig:
             raise ValueError(f"backend {name!r}: type openai needs base_url (the server's /v1 root)")
         if self.type in ("openai", "anthropic") and not self.model:
             raise ValueError(f"backend {name!r}: type {self.type} needs a model id")
+        if not isinstance(self.env, dict):
+            raise ValueError(f"backend {name!r}: env must be an object of variable names and text values")
+        for key, value in self.env.items():
+            if not isinstance(key, str) or not _ENV_NAME.match(key) or not isinstance(value, str):
+                raise ValueError(f"backend {name!r}: env must map variable names to text values (bad entry {str(key)[:40]!r})")
+            if _SECRET_HEADER.search(key):
+                # Never echo the value: it may be a key pasted in the wrong place.
+                raise ValueError(f"backend {name!r}: env.{key} looks like a credential; keys go in api_key_env or api_key_file, never in the config")
 
 
 def default_backends() -> dict[str, BackendConfig]:
@@ -94,6 +105,9 @@ class Config:
     clipboard_watch: bool = False
     toast: bool = True
     poll_interval_sec: float = 1.0
+    # How many live slot folders `install` creates (0 turns the live channel off).
+    # Every live check in the game uses one slot until the next /reload.
+    live_slots: int = 200
 
     def validate(self) -> list[str]:
         """Return human-readable problems (empty when the config is usable)."""
@@ -111,6 +125,8 @@ class Config:
                 problems.append(str(exc))
         if self.default_project and self.default_project not in self.projects:
             problems.append(f"default_project {self.default_project!r} is not a configured project")
+        if not isinstance(self.live_slots, int) or isinstance(self.live_slots, bool) or not 0 <= self.live_slots <= 400:
+            problems.append("live_slots must be a whole number from 0 to 400")
         return problems
 
 
@@ -169,6 +185,16 @@ def backend(cfg: Config, name: str) -> BackendConfig:
 
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _SECRET_HEADER = re.compile(r"(?i)auth|key|token|secret|cookie")
+
+# Variables that tell the Claude Code CLI where its settings and its login live.
+# When one is set in the shell that runs `init`, the login the user sees there
+# is not the default one, and a companion started some other way would miss it.
+LOGIN_ENV_VARS = ("CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR")
+
+
+def detect_login_env() -> dict[str, str]:
+    """The login-location variables present in this process's environment."""
+    return {name: os.environ[name] for name in LOGIN_ENV_VARS if os.environ.get(name)}
 
 
 def _clean_key(value: str) -> str | None:
@@ -243,6 +269,9 @@ def redacted(cfg: Config) -> dict:
     for b in out.get("backends", {}).values():
         headers = b.get("extra_headers") or {}
         b["extra_headers"] = {k: ("***" if _SECRET_HEADER.search(k) else v) for k, v in headers.items()}
+        env = b.get("env")
+        if isinstance(env, dict):
+            b["env"] = {k: ("***" if _SECRET_HEADER.search(str(k)) else v) for k, v in env.items()}
         if b.get("api_key_env") and not _ENV_NAME.match(b["api_key_env"]):
             b["api_key_env"] = "<invalid: looks like a key, not a variable name>"
         if b.get("api_key_env"):
@@ -278,7 +307,16 @@ def set_value(cfg: Config, dotted_key: str, raw_value: str) -> Config:
             node[part] = nxt
         node = nxt
     node[parts[-1]] = value
-    return from_dict(data)
+    updated = from_dict(data)
+    for name, bc in updated.backends.items():
+        for key in (bc.env if isinstance(bc.env, dict) else {}):
+            if isinstance(key, str) and _SECRET_HEADER.search(key):
+                # Never echo the value: it may be a key pasted in the wrong place.
+                raise ValueError(
+                    f"backends.{name}.env.{key} looks like a credential; keys go in api_key_env or api_key_file, "
+                    "never in the config; nothing was saved"
+                )
+    return updated
 
 
 def get_value(cfg: Config, dotted_key: str) -> object:

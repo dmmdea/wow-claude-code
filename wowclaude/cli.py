@@ -13,10 +13,20 @@ from pathlib import Path
 
 from wowclaude import __version__
 from wowclaude import config as cfgmod
-from wowclaude.backends import claude_auth_summary, claude_version, resolve_claude_bin
+from wowclaude.backends import claude_auth_summary, claude_live_check, claude_version, resolve_claude_bin
 from wowclaude.bridge import ENVELOPE_PREFIX, Bridge
 from wowclaude.clipboard import ClipboardWatcher
-from wowclaude.installer import addon_source_dir, install_addons, installed_status, installed_version, uninstall_addons
+from wowclaude.installer import (
+    LIVE_FILE,
+    LIVE_PREFIX,
+    addon_source_dir,
+    install_addons,
+    install_live_slots,
+    installed_live_slots,
+    installed_status,
+    installed_version,
+    uninstall_addons,
+)
 from wowclaude.luaio import SAMPLE_SAVED_VARIABLES, parse_saved_variables, read_saved_variables, to_lua, write_lua_file
 from wowclaude.notify import notify, notify_available
 from wowclaude.presets import PRESETS
@@ -82,6 +92,27 @@ def cmd_init(args: argparse.Namespace) -> int:
             return 1
         cfg.backends[preset] = cfgmod._backend_from_dict(PRESETS[preset])  # noqa: SLF001 - same package
 
+    # A Claude Code login that lives outside the default folder is selected by an
+    # environment variable. Keep it, so the companion finds the same login no
+    # matter how it is started later.
+    adopted = cfgmod.detect_login_env()
+    if adopted:
+        for bc in cfg.backends.values():
+            if bc.type == "claude-code":
+                for key, value in adopted.items():
+                    bc.env.setdefault(key, value)
+        _say("Claude Code login location found in this shell and saved for the claude-code backend: " + ", ".join(adopted))
+
+    if args.clipboard is not None:
+        cfg.clipboard_watch = bool(args.clipboard)
+    elif interactive:
+        answer = _ask(
+            "Send from the game without reloading it? The companion then reads your clipboard, "
+            f"and keeps only lines that start with {ENVELOPE_PREFIX} (y/n)",
+            "y" if cfg.clipboard_watch else "y",
+        )
+        cfg.clipboard_watch = answer.strip().lower() in ("y", "yes")
+
     problems = cfg.validate()
     path = cfgmod.save(cfg)
     _say(f"Config written to {path}")
@@ -99,13 +130,22 @@ def cmd_install(args: argparse.Namespace) -> int:
         _say("No config yet. Run `python -m wowclaude init` first.")
         return 1
     try:
+        before = len(installed_live_slots(cfg))
         written = install_addons(cfg)
+        slots, removed = install_live_slots(cfg)
     except (FileNotFoundError, ValueError) as exc:
         _say(f"install failed: {exc}")
         return 1
     for p in written:
         _say(f"installed {p}")
-    _say("If the game is running, restart it once: the client lists new addons only at launch (later updates need just /reload).")
+    if slots:
+        _say(f"live slots: {slots} folders, {LIVE_PREFIX}001 to {LIVE_PREFIX}{slots:03d} ({max(0, slots - before)} new)")
+    if removed:
+        _say(f"live slots: removed {removed} surplus folder(s)")
+    if not slots:
+        _say("live slots: none (live_slots is 0); answers are read with a /reload")
+    _say("If the game is running, type /reload there: it loads the new window and lists new slot folders.")
+    _say("If the window still says live answers are off after that, restart the game once.")
     return 0
 
 
@@ -116,8 +156,12 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
     except (FileNotFoundError, ValueError) as exc:
         _say(f"uninstall failed: {exc}")
         return 1
+    live = [p for p in removed if p.name.startswith(LIVE_PREFIX)]
     for p in removed:
-        _say(f"removed {p}")
+        if p not in live:
+            _say(f"removed {p}")
+    if live:
+        _say(f"removed {len(live)} live slot folder(s) ({live[0].name} to {live[-1].name})")
     if not removed:
         _say("nothing to remove")
     return 0
@@ -145,12 +189,18 @@ def cmd_run(args: argparse.Namespace) -> int:
     _say(f"  backends : {', '.join(f'{n} ({b.type})' for n, b in cfg.backends.items())}; default {cfg.default_backend}")
     _say(f"  projects : {', '.join(cfg.projects) or '(none)'}; default {cfg.default_project or '(none)'}")
     _say(f"  clipboard: {'on (only text starting with ' + ENVELOPE_PREFIX + ' is read)' if use_clipboard else 'off (enable with: config set clipboard_watch true)'}")
-    _say("  send a request from the in-game window; press Refresh (or /reload) there to read the answer")
+    slots = installed_live_slots(cfg)
+    if slots:
+        _say(f"  live     : {len(slots)} slot folder(s); answers reach the game without a reload (new folders count after a /reload)")
+    else:
+        _say("  live     : no slot folders installed (run: python -m wowclaude install); answers are read with a /reload")
+    _say("  type in the in-game window; with the clipboard path on, press Ctrl+C there to send")
 
     watcher = ClipboardWatcher(ENVELOPE_PREFIX, bridge.submit_envelope) if use_clipboard else None
     if watcher:
         watcher.start()
     bridge.write_data_file()
+    slots_checked = time.time()
     try:
         for req in bridge.scan(force=True):
             bridge.submit(req)
@@ -163,6 +213,12 @@ def cmd_run(args: argparse.Namespace) -> int:
                 continue
             if args.once:
                 break
+            # A slot the game had open during the last write gets it now.
+            bridge.retry_live()
+            if time.time() - slots_checked >= 30:
+                slots_checked = time.time()
+                if bridge.refresh_live_slots():
+                    bridge.write_data_file()
             time.sleep(max(0.2, cfg.poll_interval_sec))
     except KeyboardInterrupt:
         _say("stopping")
@@ -200,6 +256,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             _say(f"    {p}: parse error: {exc}")
     data = cfgmod.data_file(cfg)
     _say(f"  data file: {data} ({'present' if data.is_file() else 'absent'})")
+    slots = installed_live_slots(cfg)
+    if slots:
+        _say(f"  live slots: {len(slots)} installed (configured: {cfg.live_slots}); the game lists new ones on a /reload or at its next start")
+    else:
+        _say(f"  live slots: none installed (configured: {cfg.live_slots}); run install to create them")
     _say("backends:")
     for name, bc in cfg.backends.items():
         if bc.type == "claude-code":
@@ -207,6 +268,18 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             ver = claude_version(bc) if exe else None
             _say(f"  {name}: claude-code, binary {exe or 'NOT FOUND'}{', ' + ver if ver else ''}")
             _say(f"    auth: {claude_auth_summary(bc)}; permission_mode {bc.permission_mode}")
+            if bc.env:
+                _say(f"    env from the config: {', '.join(sorted(bc.env))}")
+            missing = {k: v for k, v in cfgmod.detect_login_env().items() if k not in bc.env}
+            if missing:
+                _say("    note: this shell sets " + ", ".join(missing) + ", so the login seen here may not be the one a")
+                _say("          companion started elsewhere uses. Save it for the companion with:")
+                _say(f"          python -m wowclaude config set backends.{name}.env '{json.dumps({**bc.env, **missing})}'")
+            if exe and args.live:
+                ok, detail = claude_live_check(name, bc)
+                _say(f"    live turn: {'ok, answered ' + repr(detail) if ok else 'FAILED: ' + detail}")
+                if not ok:
+                    hard += 1
             if not exe:
                 hard += 1
         else:
@@ -235,15 +308,37 @@ def cmd_selfcheck(args: argparse.Namespace) -> int:
     with tempfile.TemporaryDirectory() as tmp:
         wow = Path(tmp) / "WoW"
         (wow / "_forever_" / "Interface" / "AddOns").mkdir(parents=True)
-        cfg = cfgmod.Config(wow_dir=str(wow), flavor="_forever_", projects={"demo": tmp}, default_project="demo")
+        cfg = cfgmod.Config(wow_dir=str(wow), flavor="_forever_", projects={"demo": tmp}, default_project="demo", live_slots=3)
         os.environ["WOWCLAUDE_HOME"] = str(Path(tmp) / "home")
+        install_live_slots(cfg)
         bridge = Bridge(cfg)
         path = bridge.write_data_file()
         back = read_saved_variables(path)
         if back.get("ClaudeCode_Data", {}).get("schema") != 1:
             _say("selfcheck FAILED: data file did not read back")
             return 1
+        seq = back["ClaudeCode_Data"].get("seq")
+        slots = installed_live_slots(cfg)
+        if len(slots) != 3 or not seq:
+            _say(f"selfcheck FAILED: expected 3 live slots and a seq in the data file, got {len(slots)} slot(s), seq {seq!r}")
+            return 1
+        for slot in slots:
+            try:
+                live = read_saved_variables(slot / LIVE_FILE).get("ClaudeCode_Live", {})
+            except (OSError, ValueError) as exc:
+                _say(f"selfcheck FAILED: {slot.name}/{LIVE_FILE} did not read back ({exc})")
+                return 1
+            if not isinstance(live, dict) or live.get("seq") != seq:
+                _say(f"selfcheck FAILED: {slot.name}/{LIVE_FILE} does not carry the data file's seq")
+                return 1
         write_lua_file(path, {"ok": True}, "X")
+    try:
+        cfgmod.set_value(cfgmod.Config(), "backends.claude-code.env", '{"SERVICE_TOKEN": "x"}')
+    except ValueError:
+        pass
+    else:
+        _say("selfcheck FAILED: a credential-looking env name was accepted into the config")
+        return 1
     src = addon_source_dir()
     lines = {}
     for name in ("ClaudeCode", "ClaudeCode_Data"):
@@ -308,11 +403,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--project", action="append", metavar="NAME=PATH", help="a project folder for Claude Code sessions (repeatable)")
     p.add_argument("--backend", action="append", metavar="PRESET", help=f"add a backend preset: {', '.join(PRESETS)}")
     p.add_argument("--non-interactive", action="store_true", help="never prompt; fail when something required is missing")
+    group = p.add_mutually_exclusive_group()
+    group.add_argument("--clipboard", dest="clipboard", action="store_true", default=None, help="turn the clipboard send path on (no reload per send)")
+    group.add_argument("--no-clipboard", dest="clipboard", action="store_false", help="turn the clipboard send path off")
     p.set_defaults(func=cmd_init)
 
-    p = sub.add_parser("install", help="copy the two addon folders into the game's Interface/AddOns")
+    p = sub.add_parser("install", help="copy the addon folders and create the live slot folders in the game's Interface/AddOns")
     p.set_defaults(func=cmd_install)
-    p = sub.add_parser("uninstall", help="remove the two addon folders")
+    p = sub.add_parser("uninstall", help="remove the addon folders and the live slot folders")
     p.set_defaults(func=cmd_uninstall)
 
     p = sub.add_parser("run", help="watch the game's SavedVariables and answer requests")
@@ -323,6 +421,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_run)
 
     p = sub.add_parser("doctor", help="check the install: paths, addon folders, CLI, auth, config")
+    p.add_argument("--live", action="store_true", help="also run one tiny real turn through each Claude Code backend")
     p.set_defaults(func=cmd_doctor)
     p = sub.add_parser("selfcheck", help="exercise the file formats without the game (used by CI)")
     p.set_defaults(func=cmd_selfcheck)
