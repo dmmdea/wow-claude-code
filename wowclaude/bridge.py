@@ -11,10 +11,12 @@ Flow of one request:
    /reload (or the user copies the same record as a clipboard envelope).
 2. ``scan`` parses the file(s), ``submit`` queues every id not yet consumed.
 3. ``work_once`` runs one queued request on its backend, writing the data file
-   when the turn starts, every couple of seconds while text streams, and at
-   the end.
-4. The user presses Refresh (/reload) in the game; the addon reads
-   ``ClaudeCode_Data`` and prunes consumed ids from its outbox.
+   when the turn starts, every second or two while text streams, and at the
+   end. Each write also puts a small copy of the newest sessions in every live
+   slot (``publish_live``).
+4. The addon loads the next unused live slot and merges what it finds, or,
+   after a /reload, reads the full ``ClaudeCode_Data``. Either way it prunes
+   consumed ids from its outbox.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import shutil
 import threading
 import time
 from collections import deque
@@ -32,7 +35,8 @@ from typing import Callable
 from wowclaude import __version__
 from wowclaude import config as cfgmod
 from wowclaude.backends import Backend, TurnEvent, make_backend
-from wowclaude.luaio import LuaParseError, read_saved_variables, write_lua_file
+from wowclaude.installer import LIVE_FILE, LIVE_GLOBAL, installed_live_slots
+from wowclaude.luaio import LuaParseError, read_saved_variables, to_lua, write_lua_file
 
 ENVELOPE_PREFIX = "CLAUDECODE-WOW:1:"
 DATA_GLOBAL = "ClaudeCode_Data"
@@ -42,7 +46,17 @@ MAX_SESSIONS = 20
 MAX_ENTRY_CHARS = 12_000
 MAX_PROMPT_CHARS = 20_000
 MAX_REQUESTS_PER_SCAN = 20
-STREAM_FLUSH_SEC = 2.0
+STREAM_FLUSH_SEC = 1.5
+# While a turn runs the data is rewritten at least this often, even when the
+# backend says nothing (a long tool run). The game reads a newer ``seq`` as
+# "the companion is alive" and keeps checking instead of giving up.
+HEARTBEAT_SEC = 20.0
+# The live channel: one master copy beside the data file (not in that addon's
+# TOC, so the game never loads it from there), hard-linked into every slot.
+LIVE_MASTER = "ClaudeCode_Live.lua"
+LIVE_SESSIONS = 3
+LIVE_SESSION_BYTES = 60_000
+LIVE_CONSUMED = 40
 REQUEST_KINDS = ("prompt", "stop", "new")
 
 Logger = Callable[[str], None]
@@ -129,6 +143,14 @@ class Bridge:
         self._last_flush = 0.0
         self._sv_mtimes: dict[str, float] = {}
         self._sources: dict[str, str] = {}
+        # write_data_file runs on the main loop and on the clipboard thread (stop requests).
+        self._io_lock = threading.RLock()
+        self._seq = 0
+        self._live_slots: list[Path] | None = None
+        self._live_stale: list[Path] = []
+        self._data_stale = False
+        self._live_copy_mode = False
+        self._live_warned = False
 
     # ----------------------------------------------------------------- state
 
@@ -225,7 +247,7 @@ class Bridge:
         if not req:
             return False
         if not self.nonce or req.nonce != self.nonce:
-            self.log(f"clipboard envelope {req.id} ignored: it does not carry this companion's nonce (press Refresh in the game once, then copy again)")
+            self.log(f"clipboard envelope {req.id} ignored: it does not carry this companion's nonce (press Refresh, or Reload UI, in the game window once, then send again)")
             return False
         return self.submit(req, source="clipboard")
 
@@ -262,13 +284,28 @@ class Bridge:
         # kill during the run never replays an agentic session on restart.
         self._mark_consumed(req.id)
         self.save_state()
+        done = threading.Event()
+        pulse = threading.Thread(target=self._heartbeat, args=(done,), name="wowclaude-heartbeat", daemon=True)
+        pulse.start()
         try:
             self._run(req)
         finally:
+            done.set()
+            pulse.join(timeout=5)
             self.current = None
             self.save_state()
             self.write_data_file()
         return True
+
+    def _heartbeat(self, done: threading.Event) -> None:
+        """Rewrite the data now and then while a turn runs and nothing else did."""
+        while not done.wait(HEARTBEAT_SEC / 4):
+            if time.time() - self._last_flush < HEARTBEAT_SEC:
+                continue
+            try:
+                self.write_data_file()
+            except Exception as exc:  # noqa: BLE001 - a missed heartbeat must not end the turn
+                self.log(f"heartbeat write failed ({exc})")
 
     def _backend_for(self, name: str) -> tuple[str, Backend]:
         name = name or self.cfg.default_backend
@@ -347,7 +384,8 @@ class Bridge:
 
         result = backend.run_turn(req.prompt, session.setdefault("state", {}), project_dir, on_event, self.stop_event)
         session.pop("partial", None)
-        if result.text.strip():
+        # A failed turn often carries its error as the answer text too; show it once.
+        if result.text.strip() and not (result.is_error and result.text.strip() == (result.error or "").strip()):
             _append(session, "assistant", result.text)
         if result.is_error:
             _append(session, "error", result.error or "error")
@@ -356,13 +394,12 @@ class Bridge:
             session["status"] = "done"
         if result.cost_usd:
             session["cost_usd"] = round(float(session.get("cost_usd") or 0.0) + float(result.cost_usd), 4)
-        summary = _result_line(result)
-        _append(session, "result", summary)
+        _append(session, "result", _result_line(result, include_error=False))
         session["updated_at"] = int(time.time())
-        self.log(f"finished {req.id}: {summary}")
+        self.log(f"finished {req.id}: {_result_line(result)}")
         if self.notify:
             try:
-                self.notify("Claude Code", f"{session['title'][:60]}: {session['status']}. Press Refresh in the game window.")
+                self.notify("Claude Code", f"{session['title'][:60]}: {session['status']}")
             except Exception:  # noqa: BLE001 - notifications are best effort
                 pass
 
@@ -398,6 +435,7 @@ class Bridge:
                 "nonce": self.nonce,
                 "running": self.current.id if self.current else "",
                 "queued": self.pending(),
+                "live_slots": len(self._live_slot_list()),
             },
             "consumed": list(self.state.get("consumed", []))[-500:],
             "sessions": exported,
@@ -405,12 +443,147 @@ class Bridge:
         _fit_budget(payload)
         return payload
 
-    def write_data_file(self) -> Path:
-        path = cfgmod.data_file(self.cfg)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        write_lua_file(path, self.data_payload(), DATA_GLOBAL)
-        self._last_flush = time.time()
-        return path
+    def write_data_file(self, strict: bool = False) -> Path:
+        """Write the full data file, then the live copy; both carry the same ``seq``.
+
+        When the full file cannot be replaced (something holds it open for longer
+        than the retries last) the live copy is still published and ``catch_up``
+        writes again shortly. With ``strict`` the error is raised instead, which
+        is what the first write of a run wants."""
+        with self._io_lock:
+            # Milliseconds, and never repeated or going back, so the game can
+            # tell which of two snapshots is newer.
+            self._seq = max(self._seq + 1, int(time.time() * 1000))
+            path = cfgmod.data_file(self.cfg)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = self.data_payload()
+            payload["seq"] = self._seq
+            try:
+                write_lua_file(path, payload, DATA_GLOBAL)
+                self._data_stale = False
+            except OSError as exc:
+                if strict:
+                    raise
+                self._data_stale = True
+                self.log(f"data file not written ({exc}); it is written again shortly")
+            self.publish_live(payload)
+            self._last_flush = time.time()
+            return path
+
+    # ------------------------------------------------------------- live slots
+
+    def _live_slot_list(self) -> list[Path]:
+        """The slot folders, read from disk once and cached (a listdir per write is waste)."""
+        if self._live_slots is None:
+            self._live_slots = installed_live_slots(self.cfg)
+        return self._live_slots
+
+    def refresh_live_slots(self) -> bool:
+        """Re-read the slot folders. True when they changed, for example because
+        ``install`` ran during this run; the caller then writes the data file."""
+        with self._io_lock:
+            before = self._live_slot_list()
+            self._live_slots = installed_live_slots(self.cfg)
+            changed = self._live_slots != before
+            if changed:
+                self.log(f"live slots: now {len(self._live_slots)} folder(s) (was {len(before)})")
+            return changed
+
+    def live_payload(self, full: dict) -> dict:
+        """A small snapshot for the slot files: the newest sessions, each trimmed
+        from the front to LIVE_SESSION_BYTES, because the game parses the whole
+        file in one go at load time."""
+        sessions = full.get("sessions", {})
+        newest = sorted(sessions.values(), key=lambda s: s.get("updated_at", 0), reverse=True)[:LIVE_SESSIONS]
+        return {
+            "schema": full.get("schema", DATA_SCHEMA),
+            "seq": full.get("seq", 0),
+            "generated_at": full.get("generated_at", 0),
+            "companion_version": full.get("companion_version", __version__),
+            "config": full.get("config", {}),
+            "consumed": list(full.get("consumed", []))[-LIVE_CONSUMED:],
+            "sessions": {s["key"]: _trim_session(s) for s in newest},
+        }
+
+    def publish_live(self, full: dict) -> int:
+        """Put the live snapshot in every slot's Live.lua. Returns the slots updated.
+
+        Never raises: a slot the game holds open is skipped, remembered, and
+        brought up to date by ``retry_live`` or the next write. The master is
+        hard-linked to a temp name in each slot and renamed over Live.lua,
+        because the game only reads file names it already knows.
+        """
+        slots = self._live_slot_list()
+        if not slots:
+            return 0
+        with self._io_lock:
+            master = self._live_master()
+            try:
+                write_lua_file(master, self.live_payload(full), LIVE_GLOBAL)
+            except (OSError, ValueError, TypeError) as exc:
+                self._warn_live(f"live copy not written ({exc}); answers will be read with a /reload")
+                return 0
+            updated = self._link_slots(master, slots)
+            if not updated:
+                self._warn_live(f"live copy: none of the {len(slots)} slot folders could be updated (is the game holding the files? did install change them?)")
+            return updated
+
+    def catch_up(self) -> None:
+        """Called when idle: finish what the last write could not."""
+        if self._data_stale:
+            if time.time() - self._last_flush >= 5:
+                self.write_data_file()
+        else:
+            self.retry_live()
+
+    def retry_live(self) -> int:
+        """Update the slots the last write had to skip. Returns how many caught up."""
+        with self._io_lock:
+            if not self._live_stale:
+                return 0
+            master = self._live_master()
+            if not master.is_file():
+                return 0
+            return self._link_slots(master, list(self._live_stale))
+
+    def _live_master(self) -> Path:
+        return cfgmod.data_file(self.cfg).with_name(LIVE_MASTER)
+
+    def _link_slots(self, master: Path, slots: list[Path]) -> int:
+        """Put ``master`` in each slot as Live.lua; the ones that fail become ``_live_stale``."""
+        updated = 0
+        stale: list[Path] = []
+        for slot in slots:
+            temp = slot / (LIVE_FILE + ".new")
+            try:
+                temp.unlink(missing_ok=True)
+                if self._live_copy_mode:
+                    shutil.copyfile(master, temp)
+                else:
+                    try:
+                        os.link(master, temp)
+                    except OSError:
+                        # No hard links on this volume: copy instead. If the copy
+                        # fails too, the slot is the problem and it is skipped.
+                        shutil.copyfile(master, temp)
+                        self._live_copy_mode = True
+                        self.log("live slots: this file system has no hard links; copying the live file into each slot instead")
+                os.replace(temp, slot / LIVE_FILE)
+                updated += 1
+            except OSError:
+                stale.append(slot)
+                try:
+                    temp.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        self._live_stale = stale
+        return updated
+
+    def _warn_live(self, msg: str) -> None:
+        """Log a live-channel problem once per run; it would repeat on every write."""
+        if not self._live_warned:
+            self._live_warned = True
+            self.log(msg)
 
 
 # ------------------------------------------------------------------- helpers
@@ -420,25 +593,57 @@ def _append(session: dict, role: str, text: str) -> None:
     entries.append({"role": role, "text": text[:MAX_ENTRY_CHARS], "ts": int(time.time())})
 
 
+def _trim_session(session: dict) -> dict:
+    """A copy of ``session`` whose oldest entries are dropped until it serializes
+    to at most LIVE_SESSION_BYTES (always keeping the last two entries).
+    ``first`` is how many leading entries were left out, ``total`` the full count."""
+    entries = list(session.get("entries", []))
+    total = len(entries)
+
+    def build(skip: int) -> dict:
+        out = {k: v for k, v in session.items() if k != "entries"}
+        out["entries"] = entries[skip:]
+        out["first"] = skip
+        out["total"] = total
+        return out
+
+    def fits(skip: int) -> bool:
+        return len(to_lua(build(skip), LIVE_GLOBAL).encode("utf-8")) <= LIVE_SESSION_BYTES
+
+    lo, hi = 0, max(0, total - 2)
+    if fits(0):
+        return build(0)
+    # Size only shrinks as more leading entries go, so bisect for the smallest skip that fits.
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if fits(mid):
+            hi = mid
+        else:
+            lo = mid + 1
+    return build(lo)
+
+
 def _title_from(prompt: str) -> str:
     first = prompt.strip().splitlines()[0] if prompt.strip() else ""
     return first[:48] + ("..." if len(first) > 48 else "")
 
 
-def _result_line(result) -> str:  # type: ignore[no-untyped-def]
+def _result_line(result, include_error: bool = True) -> str:  # type: ignore[no-untyped-def]
+    """Timing and usage of a finished turn. The transcript shows the error in
+    its own entry, so its result line leaves the error text out."""
     bits = []
     if result.duration_ms is not None:
         bits.append(f"{result.duration_ms / 1000:.1f}s")
     if result.num_turns:
-        bits.append(f"{result.num_turns} turns")
-    if result.cost_usd is not None:
+        bits.append(f"{result.num_turns} turn{'' if result.num_turns == 1 else 's'}")
+    if result.cost_usd:
         bits.append(f"${result.cost_usd:.4f}")
     usage = result.usage if isinstance(result.usage, dict) else {}
     tokens = usage.get("output_tokens") or usage.get("completion_tokens")
     if tokens:
         bits.append(f"{tokens} output tokens")
     if result.is_error:
-        bits.append(f"error: {result.error}")
+        bits.append(f"error: {result.error}" if include_error else "failed")
     return ", ".join(bits) or "done"
 
 
