@@ -261,6 +261,10 @@ def cmd_run(args: argparse.Namespace) -> int:
         if watcher:
             watcher.stop()
         bridge.write_data_file()
+        try:
+            bridge.close()
+        except KeyboardInterrupt:
+            pass
         run_lock.close()
     return 0
 

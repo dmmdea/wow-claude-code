@@ -189,15 +189,67 @@ def claude_live_check(name: str, bc: BackendConfig, cwd: Path | None = None) -> 
     text)."""
     backend = ClaudeCodeBackend(name, bc)
     result = backend.run_turn("Reply with the single word: ok", {}, cwd, lambda ev: None, threading.Event())
+    # A one-shot check: let the CLI close its session before this process exits.
+    backend.wait_previous()
     if result.is_error:
         return False, _truncate(result.error or result.text or "error", 200)
     return True, _truncate(result.text or "(empty answer)", 80)
+
+
+# How long the next turn (or the companion's exit) waits for the CLI process of
+# the previous turn, which may still be running its end-of-session hooks.
+CLOSE_WAIT_SEC = 120.0
+
+
+def _drain_until_exit(proc: subprocess.Popen) -> None:
+    """Keep reading a finished turn's CLI output until the process exits, so the
+    process never blocks on a full pipe while it closes its session."""
+    try:
+        if proc.stdout is not None:
+            for _ in proc.stdout:
+                pass
+    except (OSError, ValueError):
+        pass
+    try:
+        proc.wait()
+    except OSError:
+        pass
 
 
 class ClaudeCodeBackend:
     def __init__(self, name: str, bc: BackendConfig) -> None:
         self.name = name
         self.bc = bc
+        # The CLI process of the last finished turn, while it is still alive.
+        self._closing: subprocess.Popen | None = None
+
+    def busy(self) -> bool:
+        """True while the CLI process of the last turn is still closing its session."""
+        proc = self._closing
+        return proc is not None and proc.poll() is None
+
+    def wait_previous(self, stop: threading.Event | None = None, limit: float = CLOSE_WAIT_SEC) -> bool:
+        """Wait for the CLI process of the last turn to exit.
+
+        A turn ends when the CLI prints its result, but the process may go on
+        running end-of-session hooks for a while. It is left to finish on its
+        own; the next turn and the companion's exit wait for it here, so two CLI
+        processes never work on one session at once and the hooks are not cut
+        short. Returns False when ``stop`` was set or the limit passed first."""
+        proc = self._closing
+        if proc is None:
+            return True
+        deadline = time.time() + limit
+        while proc.poll() is None:
+            if time.time() >= deadline:
+                return False
+            if stop is not None:
+                if stop.wait(0.25):
+                    return False
+            else:
+                time.sleep(0.25)
+        self._closing = None
+        return True
 
     def describe(self) -> str:
         return f"claude-code (bin={self.bc.claude_bin}, permission_mode={self.bc.permission_mode})"
@@ -240,6 +292,10 @@ class ClaudeCodeBackend:
             return TurnResult(is_error=True, error=msg)
         resume_id = session.get("claude_session_id")
         argv = self.build_argv(exe, resume_id)
+        if not self.wait_previous(stop):
+            if stop.is_set():
+                return TurnResult(session_id=resume_id, is_error=True, error="stopped by the user")
+            on_event(TurnEvent("status", "the previous Claude Code session is still closing; starting this turn anyway"))
         started = time.time()
         try:
             proc = subprocess.Popen(
@@ -272,11 +328,15 @@ class ClaudeCodeBackend:
                 stderr_chunks.append(line)
 
         threading.Thread(target=feed_prompt, daemon=True).start()
+        finished = threading.Event()
 
         def watch_stop() -> None:
-            while proc.poll() is None:
+            # Stop ends a running turn. Once the turn has its result the process
+            # is only closing its session, and that is never cut short.
+            while proc.poll() is None and not finished.is_set():
                 if stop.wait(0.25):
-                    proc.terminate()
+                    if not finished.is_set():
+                        proc.terminate()
                     return
 
         threading.Thread(target=drain_stderr, daemon=True).start()
@@ -329,7 +389,17 @@ class ClaudeCodeBackend:
                 if result.is_error:
                     result.error = _result_error(msg)
                 on_event(TurnEvent("result", _truncate(str(final or ""), 200), msg))
-        code = proc.wait()
+                break
+        code: int | None = None
+        if saw_result and not stop.is_set():
+            # The turn is over. The CLI may still be running end-of-session
+            # hooks, which can take half a minute; it finishes on its own and
+            # the next turn waits for it (wait_previous).
+            finished.set()
+            self._closing = proc
+            threading.Thread(target=_drain_until_exit, args=(proc,), name="wowclaude-cli-exit", daemon=True).start()
+        else:
+            code = proc.wait()
         if stop.is_set():
             result.is_error = True
             result.error = "stopped by the user"

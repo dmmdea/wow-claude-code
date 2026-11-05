@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.2 (2026-11-04)
+
+- A Claude Code turn is finished when the CLI prints its result. The CLI process can keep running
+  after that (end-of-session hooks such as a memory sync; 38 seconds on the machine where this was
+  measured), and until now the answer stayed "running" for all of that time. The process is left
+  to finish on its own, the next turn waits for it, and so does the companion's exit.
+- Docs: `--bare` in `extra_args` works only with an API key, because the CLI then reads no login.
+  A troubleshooting note on speed and usage.
+
 ## 0.2.1 (2026-11-04)
 
 - One companion at a time. `run` takes a lock in the config folder and a second `run` stops with

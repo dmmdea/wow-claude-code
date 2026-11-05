@@ -2,7 +2,7 @@
 ## Title: Claude Code Data
 ## Notes: Bridge file written by the wowclaude companion. Do not edit by hand; the game reads it at login and on /reload.
 ## Author: dmmdea
-## Version: 0.2.1
+## Version: 0.2.2
 ## IconTexture: Interface\Icons\INV_Misc_Note_01
 ## Group: ClaudeCode
 ## Category: Development
