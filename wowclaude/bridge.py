@@ -47,6 +47,10 @@ MAX_ENTRY_CHARS = 12_000
 MAX_PROMPT_CHARS = 20_000
 MAX_REQUESTS_PER_SCAN = 20
 STREAM_FLUSH_SEC = 1.5
+# While a turn runs the data is rewritten at least this often, even when the
+# backend says nothing (a long tool run). The game reads a newer ``seq`` as
+# "the companion is alive" and keeps checking instead of giving up.
+HEARTBEAT_SEC = 20.0
 # The live channel: one master copy beside the data file (not in that addon's
 # TOC, so the game never loads it from there), hard-linked into every slot.
 LIVE_MASTER = "ClaudeCode_Live.lua"
@@ -144,6 +148,7 @@ class Bridge:
         self._seq = 0
         self._live_slots: list[Path] | None = None
         self._live_stale: list[Path] = []
+        self._data_stale = False
         self._live_copy_mode = False
         self._live_warned = False
 
@@ -242,7 +247,7 @@ class Bridge:
         if not req:
             return False
         if not self.nonce or req.nonce != self.nonce:
-            self.log(f"clipboard envelope {req.id} ignored: it does not carry this companion's nonce (press Refresh in the game once, then copy again)")
+            self.log(f"clipboard envelope {req.id} ignored: it does not carry this companion's nonce (press Refresh, or Reload UI, in the game window once, then send again)")
             return False
         return self.submit(req, source="clipboard")
 
@@ -279,13 +284,28 @@ class Bridge:
         # kill during the run never replays an agentic session on restart.
         self._mark_consumed(req.id)
         self.save_state()
+        done = threading.Event()
+        pulse = threading.Thread(target=self._heartbeat, args=(done,), name="wowclaude-heartbeat", daemon=True)
+        pulse.start()
         try:
             self._run(req)
         finally:
+            done.set()
+            pulse.join(timeout=5)
             self.current = None
             self.save_state()
             self.write_data_file()
         return True
+
+    def _heartbeat(self, done: threading.Event) -> None:
+        """Rewrite the data now and then while a turn runs and nothing else did."""
+        while not done.wait(HEARTBEAT_SEC / 4):
+            if time.time() - self._last_flush < HEARTBEAT_SEC:
+                continue
+            try:
+                self.write_data_file()
+            except Exception as exc:  # noqa: BLE001 - a missed heartbeat must not end the turn
+                self.log(f"heartbeat write failed ({exc})")
 
     def _backend_for(self, name: str) -> tuple[str, Backend]:
         name = name or self.cfg.default_backend
@@ -423,8 +443,13 @@ class Bridge:
         _fit_budget(payload)
         return payload
 
-    def write_data_file(self) -> Path:
-        """Write the full data file, then the live copy; both carry the same ``seq``."""
+    def write_data_file(self, strict: bool = False) -> Path:
+        """Write the full data file, then the live copy; both carry the same ``seq``.
+
+        When the full file cannot be replaced (something holds it open for longer
+        than the retries last) the live copy is still published and ``catch_up``
+        writes again shortly. With ``strict`` the error is raised instead, which
+        is what the first write of a run wants."""
         with self._io_lock:
             # Milliseconds, and never repeated or going back, so the game can
             # tell which of two snapshots is newer.
@@ -433,7 +458,14 @@ class Bridge:
             path.parent.mkdir(parents=True, exist_ok=True)
             payload = self.data_payload()
             payload["seq"] = self._seq
-            write_lua_file(path, payload, DATA_GLOBAL)
+            try:
+                write_lua_file(path, payload, DATA_GLOBAL)
+                self._data_stale = False
+            except OSError as exc:
+                if strict:
+                    raise
+                self._data_stale = True
+                self.log(f"data file not written ({exc}); it is written again shortly")
             self.publish_live(payload)
             self._last_flush = time.time()
             return path
@@ -495,6 +527,14 @@ class Bridge:
             if not updated:
                 self._warn_live(f"live copy: none of the {len(slots)} slot folders could be updated (is the game holding the files? did install change them?)")
             return updated
+
+    def catch_up(self) -> None:
+        """Called when idle: finish what the last write could not."""
+        if self._data_stale:
+            if time.time() - self._last_flush >= 5:
+                self.write_data_file()
+        else:
+            self.retry_live()
 
     def retry_live(self) -> int:
         """Update the slots the last write had to skip. Returns how many caught up."""

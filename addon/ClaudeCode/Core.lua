@@ -22,7 +22,10 @@ CC.LIVE_MAX = 400
 -- Seconds between live checks while an answer is pending; the last one repeats.
 -- Every check spends one slot, so the gaps grow.
 CC.POLL_STEPS = { 3, 4, 5, 6, 8, 10, 14, 20, 25, 30, 35, 40, 50, 60 }
-CC.POLL_GIVE_UP = 12
+-- Checks in a row that found nothing new before the checking stops. The
+-- companion rewrites its data at least every 20 seconds while a turn runs, so
+-- this many silent checks mean it is not running.
+CC.POLL_GIVE_UP = 8
 CC.VERSION = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, 'Version'))
 	or (GetAddOnMetadata and GetAddOnMetadata(ADDON_NAME, 'Version'))
 	or '?'
@@ -234,7 +237,7 @@ function CC:Dispatch(request, forceMode)
 	if self.db.settings.auto_reload then
 		self:Reload()
 	else
-		self:Print('queued; press Refresh (or /reload) to send it to the companion.')
+		self:Print('queued; it leaves the game at your next /reload.')
 	end
 	return 'reload'
 end
@@ -617,6 +620,17 @@ local function slashHandler(input)
 		if CC.Render then
 			CC:Render()
 		end
+	elseif command == 'mode' then
+		if rest == 'auto' or rest == 'reload' or rest == 'clipboard' then
+			CC.db.settings.send_mode = rest
+		elseif rest ~= '' then
+			CC:Print('usage: /claude mode auto|reload|clipboard')
+		end
+		CC:Print(string.format('send mode is %s: a message leaves the game by %s.', CC.db.settings.send_mode or 'auto',
+			CC:EffectiveSendMode() == 'clipboard' and 'Ctrl+C (no reload)' or 'a reload'))
+		if CC.Render then
+			CC:Render()
+		end
 	elseif command == 'sound' then
 		CC.db.settings.sound = not CC.db.settings.sound
 		CC:Print('answer sound ' .. (CC.db.settings.sound and 'on' or 'off') .. '.')
@@ -628,7 +642,7 @@ local function slashHandler(input)
 			CC:Print(CC.loadError)
 		end
 	else
-		CC:Print('commands: /claude [toggle|send <prompt>|copy <prompt>|new|stop|refresh|reload|status|live [on|off]|sound|minimap [reset]]')
+		CC:Print('commands: /claude [toggle|send <prompt>|copy <prompt>|new|stop|refresh|reload|status|live [on|off]|mode [auto|reload|clipboard]|sound|minimap [reset]]')
 	end
 end
 

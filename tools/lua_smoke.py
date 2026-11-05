@@ -4,7 +4,8 @@ A developer tool, not a test suite: it loads Json.lua, Core.lua and UI.lua into
 a LuaJIT runtime with a small stand-in for the client API, fires ADDON_LOADED,
 and walks the paths a player takes once: type a message and press Enter, press
 Ctrl+C on the selected line, watch the answer arrive through the live slots,
-cancel a send, run out of live checks, fall back to a reload. Any Lua syntax
+cancel a send (Esc, a click outside the window, a second request), run out of
+live checks, fall back to a reload. Any Lua syntax
 error or runtime error on those paths fails loudly here instead of in the game.
 
 The stand-in keeps just enough state to make that walk honest: which text box
@@ -34,6 +35,7 @@ local frames = {}
 local focused = nil
 local clock, timers = 0, {}
 local keys = { ctrl = false, shift = false }
+local mouse = { over = nil }
 local slots = { count = 0, loaded = {}, payload = nil }
 
 local Widget = {}
@@ -99,6 +101,7 @@ function Widget:SetFocus()
 end
 function Widget:ClearFocus() if focused == self then dropFocus() end end
 function Widget:HasFocus() return focused == self end
+function Widget:IsMouseOver() return mouse.over == self end
 function Widget:SetSize(w, h) self.w, self.h = w, h end
 function Widget:SetWidth(w) self.w = w end
 function Widget:SetHeight(h) self.h = h end
@@ -191,12 +194,12 @@ function __advance(seconds)
     end
     clock = stop
 end
-__calls, __frames, __keys, __slots, __fire = calls, frames, keys, slots, fire
+__calls, __frames, __keys, __slots, __fire, __mouse = calls, frames, keys, slots, fire, mouse
 __focused = function() return focused end
 """
 
 DRIVER = r"""
-local calls, frames, keys, slots, fire = __calls, __frames, __keys, __slots, __fire
+local calls, frames, keys, slots, fire, mouse = __calls, __frames, __keys, __slots, __fire, __mouse
 local CC = ClaudeCode
 
 local function event(name, ...)
@@ -347,6 +350,36 @@ assert(cancelled and inOutbox(cancelled.id), 'second send not staged')
 fire(CC.envelopeBox, 'OnEscapePressed')
 assert(not CC.copying and not inOutbox(cancelled.id) and CC.promptBox:GetText() == 'take || this back', 'cancel did not restore the message')
 
+-- a click outside the window gives the keyboard back to the game; one inside does not
+fire(CC.promptBox, 'OnEnterPressed')
+local staged = CC.copying
+assert(staged and __focused() == CC.envelopeBox, 'third send not staged')
+mouse.over = CC.frame
+event('GLOBAL_MOUSE_DOWN', 'LeftButton')
+assert(CC.copying == staged, 'a click inside the window must not take the message back')
+mouse.over = nil
+event('GLOBAL_MOUSE_DOWN', 'RightButton')
+assert(not CC.copying and not inOutbox(staged.id) and __focused() == nil, 'a click outside the window did not give the keyboard back')
+assert(CC.promptBox:GetText() == 'take || this back', 'the message did not return to the box')
+
+-- one staged request at a time: a second one takes the first back
+fire(CC.promptBox, 'OnEnterPressed')
+local first = CC.copying
+SlashCmdList.CLAUDECODE('copy another one')
+local second = CC.copying
+assert(first and second and second ~= first and second.prompt == 'another one', 'the second request was not staged')
+assert(not inOutbox(first.id) and inOutbox(second.id), 'the first staged request was not taken back')
+assert(CC.promptBox:GetText() == 'take || this back', 'the first message did not return to the box')
+-- the client takes the keyboard away in the frame that staged the line: the
+-- request stays staged and the line gets the keyboard back on the next frame
+CC.envelopeBox:ClearFocus()
+assert(CC.copying == second, 'losing the keyboard in the staging frame must not take the request back')
+__advance(0.01)
+assert(CC.copying == second and __focused() == CC.envelopeBox, 'the selected line did not get the keyboard back')
+CC.envelopeBox:ClearFocus()
+assert(not CC.copying and not inOutbox(second.id), 'losing the keyboard later takes the request back')
+assert(CC.promptBox:GetText() == 'take || this back', 'a draft in the message box must not be overwritten')
+
 -- the last live check is used up: Refresh says what it does, and only then reloads
 assert(CC:LiveLeft() == 1 and CC:Refresh() == 'same' and calls.reload == 1, 'the last live check must not reload')
 assert(CC:LiveLeft() == 0 and CC.refreshButton.label:GetText() == 'Reload UI', 'the button must say it reloads')
@@ -357,6 +390,12 @@ ClaudeCode_Data.config.clipboard_watch = false
 assert(CC:EffectiveSendMode() == 'reload', 'send mode should follow the companion')
 CC:SendPrompt('by reload')
 assert(calls.reload == 3 and not CC.copying, 'reload send must reload')
+-- the send mode can be forced from the chat line, whatever the companion reports
+ClaudeCode_Data.config.clipboard_watch = true
+SlashCmdList.CLAUDECODE('mode reload')
+assert(CC:EffectiveSendMode() == 'reload', 'mode reload must force the reload path')
+SlashCmdList.CLAUDECODE('mode auto')
+assert(CC:EffectiveSendMode() == 'clipboard', 'mode auto must follow the companion again')
 SlashCmdList.CLAUDECODE('status')
 SlashCmdList.CLAUDECODE('live')
 return envelope, #calls.messages, answered

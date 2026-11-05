@@ -56,6 +56,7 @@ def _ask(prompt: str, default: str = "") -> str:
 # ------------------------------------------------------------------------ init
 
 def cmd_init(args: argparse.Namespace) -> int:
+    first_run = not cfgmod.config_path().is_file()
     cfg = cfgmod.load()
     interactive = _interactive() and not args.non_interactive
 
@@ -109,13 +110,15 @@ def cmd_init(args: argparse.Namespace) -> int:
         answer = _ask(
             "Send from the game without reloading it? The companion then reads your clipboard, "
             f"and keeps only lines that start with {ENVELOPE_PREFIX} (y/n)",
-            "y" if cfg.clipboard_watch else "y",
+            # yes for a new install; a later init keeps what the config says
+            "y" if (first_run or cfg.clipboard_watch) else "n",
         )
         cfg.clipboard_watch = answer.strip().lower() in ("y", "yes")
 
     problems = cfg.validate()
     path = cfgmod.save(cfg)
     _say(f"Config written to {path}")
+    _say(f"Clipboard send path: {'on' if cfg.clipboard_watch else 'off'} (change it with: python -m wowclaude config set clipboard_watch true|false)")
     for p in problems:
         _say(f"  note: {p}")
     _say("Next: `python -m wowclaude install`, then `python -m wowclaude run` while you play.")
@@ -199,7 +202,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     watcher = ClipboardWatcher(ENVELOPE_PREFIX, bridge.submit_envelope) if use_clipboard else None
     if watcher:
         watcher.start()
-    bridge.write_data_file()
+    bridge.write_data_file(strict=True)
     slots_checked = time.time()
     try:
         for req in bridge.scan(force=True):
@@ -213,8 +216,8 @@ def cmd_run(args: argparse.Namespace) -> int:
                 continue
             if args.once:
                 break
-            # A slot the game had open during the last write gets it now.
-            bridge.retry_live()
+            # A file the game had open during the last write gets it now.
+            bridge.catch_up()
             if time.time() - slots_checked >= 30:
                 slots_checked = time.time()
                 if bridge.refresh_live_slots():
@@ -230,6 +233,21 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------- doctor
+
+def _live_turn(cfg: cfgmod.Config, name: str, bc: cfgmod.BackendConfig) -> tuple[bool, str]:
+    """One real turn for ``doctor --live``: in the default project folder when
+    there is one, else in an empty folder, never in the shell's current folder."""
+    folder: Path | None = None
+    if cfg.default_project:
+        try:
+            folder = Path(cfgmod.project_dir(cfg, cfg.default_project))
+        except KeyError:
+            folder = None
+    if folder and folder.is_dir():
+        return claude_live_check(name, bc, folder)
+    with tempfile.TemporaryDirectory(prefix="wowclaude-live-") as empty:
+        return claude_live_check(name, bc, Path(empty))
+
 
 def cmd_doctor(args: argparse.Namespace) -> int:
     hard = 0
@@ -268,15 +286,18 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             ver = claude_version(bc) if exe else None
             _say(f"  {name}: claude-code, binary {exe or 'NOT FOUND'}{', ' + ver if ver else ''}")
             _say(f"    auth: {claude_auth_summary(bc)}; permission_mode {bc.permission_mode}")
-            if bc.env:
-                _say(f"    env from the config: {', '.join(sorted(bc.env))}")
-            missing = {k: v for k, v in cfgmod.detect_login_env().items() if k not in bc.env}
+            saved_env = bc.env if isinstance(bc.env, dict) else {}
+            if saved_env:
+                _say(f"    env from the config: {', '.join(sorted(saved_env))}")
+            missing = {k: v for k, v in cfgmod.detect_login_env().items() if k not in saved_env}
             if missing:
                 _say("    note: this shell sets " + ", ".join(missing) + ", so the login seen here may not be the one a")
                 _say("          companion started elsewhere uses. Save it for the companion with:")
-                _say(f"          python -m wowclaude config set backends.{name}.env '{json.dumps({**bc.env, **missing})}'")
+                for key, value in missing.items():
+                    # One plain value per command: it survives every shell's quoting.
+                    _say(f'          python -m wowclaude config set backends.{name}.env.{key} "{value}"')
             if exe and args.live:
-                ok, detail = claude_live_check(name, bc)
+                ok, detail = _live_turn(cfg, name, bc)
                 _say(f"    live turn: {'ok, answered ' + repr(detail) if ok else 'FAILED: ' + detail}")
                 if not ok:
                     hard += 1
@@ -421,7 +442,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_run)
 
     p = sub.add_parser("doctor", help="check the install: paths, addon folders, CLI, auth, config")
-    p.add_argument("--live", action="store_true", help="also run one tiny real turn through each Claude Code backend")
+    p.add_argument("--live", action="store_true", help="also run one tiny real turn through each Claude Code backend (it uses a little of your Claude usage)")
     p.set_defaults(func=cmd_doctor)
     p = sub.add_parser("selfcheck", help="exercise the file formats without the game (used by CI)")
     p.set_defaults(func=cmd_selfcheck)

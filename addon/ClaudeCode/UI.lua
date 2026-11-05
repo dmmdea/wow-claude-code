@@ -54,10 +54,20 @@ local function paintText(hex, text)
 	return '|c' .. hex .. text .. '|r'
 end
 
+--- The first n bytes of a text with '...' when it is longer, never ending
+--- inside a UTF-8 sequence.
 local function truncate(text, n)
 	text = tostring(text or '')
 	if #text > n then
-		return text:sub(1, n - 3) .. '...'
+		local stop = n - 3
+		while stop > 0 do
+			local byte = text:byte(stop + 1)
+			if not byte or byte < 128 or byte >= 192 then
+				break
+			end
+			stop = stop - 1
+		end
+		return text:sub(1, stop) .. '...'
 	end
 	return text
 end
@@ -369,6 +379,9 @@ function CC:CreateUI()
 	local newChat = flatButton(side, '+  New chat', SIDE_W - 16, 26)
 	newChat:SetPoint('TOPLEFT', side, 'TOPLEFT', 8, -9)
 	newChat:SetScript('OnClick', function()
+		if self.copying then
+			self:CancelCopy()
+		end
 		self:StartNewSession()
 		self.stickBottom = true
 		self:Render()
@@ -395,6 +408,9 @@ function CC:CreateUI()
 	transcript:SetAutoFocus(false)
 	transcript:SetFontObject(ChatFontNormal)
 	transcript:SetMaxLetters(0)
+	if transcript.SetMaxBytes then
+		transcript:SetMaxBytes(0)
+	end
 	transcript:EnableMouse(true)
 	transcript:SetTextColor(COLOR.text[1], COLOR.text[2], COLOR.text[3])
 	if transcript.SetSpacing then
@@ -481,6 +497,9 @@ function CC:CreateUI()
 	prompt:SetAutoFocus(false)
 	prompt:SetFontObject(ChatFontNormal)
 	prompt:SetMaxLetters(0)
+	if prompt.SetMaxBytes then
+		prompt:SetMaxBytes(0)
+	end
 	prompt:EnableMouse(true)
 	prompt:SetTextColor(COLOR.text[1], COLOR.text[2], COLOR.text[3])
 	prompt:SetWidth(300)
@@ -584,7 +603,8 @@ function CC:CreateUI()
 		self:CancelCopy()
 	end)
 	envelope:SetScript('OnEditFocusLost', function()
-		if self.copying then
+		-- not in the frame that staged it: see ShowEnvelope
+		if self.copying and self.copyGrace ~= self.copying then
 			self:CancelCopy()
 		end
 	end)
@@ -655,15 +675,22 @@ function CC:CreateUI()
 		self:Layout()
 	end)
 
-	-- a click on the window's own background gives the keyboard back to the game
+	-- A click on the window's own background, or anywhere outside the window,
+	-- gives the keyboard back to the game. The client reports every mouse press
+	-- with GLOBAL_MOUSE_DOWN; the window listens only while it is open.
 	f:SetScript('OnMouseDown', function()
-		transcript:ClearFocus()
-		prompt:ClearFocus()
+		self:ReleaseKeyboard()
+	end)
+	f:SetScript('OnEvent', function(_, event)
+		if event == 'GLOBAL_MOUSE_DOWN' and not f:IsMouseOver() then
+			self:ReleaseKeyboard()
+		end
 	end)
 	f:SetScript('OnSizeChanged', function(_, width, height)
 		self:Layout(width, height)
 	end)
 	f:SetScript('OnShow', function()
+		pcall(f.RegisterEvent, f, 'GLOBAL_MOUSE_DOWN')
 		self.unread = false
 		self.stickBottom = true
 		self:Layout()
@@ -673,9 +700,8 @@ function CC:CreateUI()
 		end
 	end)
 	f:SetScript('OnHide', function()
-		if self.copying then
-			self:CancelCopy()
-		end
+		pcall(f.UnregisterEvent, f, 'GLOBAL_MOUSE_DOWN')
+		self:ReleaseKeyboard()
 	end)
 
 	self.built = true
@@ -706,6 +732,9 @@ function CC:EnsureRows(count)
 		row:SetScript('OnClick', function(button)
 			if not button.sessionKey then
 				return
+			end
+			if self.copying then
+				self:CancelCopy()
 			end
 			self.ui.session = button.sessionKey
 			self.newSession = false
@@ -813,11 +842,22 @@ end
 
 --- Show the request as one selected line; Ctrl+C sends it.
 function CC:ShowEnvelope(request)
+	-- One staged request at a time: an earlier one is taken back first, and its
+	-- text returns to the message box.
+	local earlier = self.copying
+	if earlier and earlier ~= request then
+		self:CancelCopy()
+		if request.kind ~= 'stop' and request.session_key ~= '' then
+			self.ui.session = request.session_key
+			self.newSession = false
+		end
+	end
 	if not self.frame:IsShown() then
 		self.frame:Show()
 	end
 	self.copying = request
 	self.envelopeText = self:Envelope(request)
+	self.promptBox:ClearFocus()
 	self.pscroll:Hide()
 	self.placeholder:Hide()
 	self.staged:SetText(request.kind == 'stop' and 'Stop the running turn' or esc(truncate(request.prompt or '', 400)))
@@ -828,6 +868,31 @@ function CC:ShowEnvelope(request)
 	self.envelopeBox:SetFocus()
 	self.envelopeBox:HighlightText()
 	self:Render()
+	-- The key press or slash command that led here is still being handled by
+	-- the client. If that takes the keyboard away from the line in this same
+	-- frame, the request stays staged and the line gets the keyboard back once.
+	if C_Timer and C_Timer.After then
+		self.copyGrace = request
+		C_Timer.After(0, function()
+			if self.copyGrace == request then
+				self.copyGrace = nil
+			end
+			if self.copying == request and not self.envelopeBox:HasFocus() then
+				self.envelopeBox:SetFocus()
+				self.envelopeBox:HighlightText()
+			end
+		end)
+	end
+end
+
+--- Give the keyboard back to the game: a staged message returns to the message
+--- box and no text box of the window keeps the focus.
+function CC:ReleaseKeyboard()
+	if self.copying then
+		self:CancelCopy()
+	end
+	self.transcriptBox:ClearFocus()
+	self.promptBox:ClearFocus()
 end
 
 function CC:HideEnvelope()
@@ -862,7 +927,10 @@ function CC:CancelCopy()
 	self:Withdraw(request.id)
 	self:HideEnvelope()
 	if request.kind ~= 'stop' then
-		self.promptBox:SetText(esc(request.prompt or ''))
+		-- back into the message box, unless a draft is already waiting there
+		if self.promptBox:GetText() == '' then
+			self.promptBox:SetText(esc(request.prompt or ''))
+		end
 		if request.kind == 'new' then
 			self.newSession = true
 		end
@@ -889,7 +957,7 @@ function CC:Announce(session)
 	if not shown then
 		self.unread = true
 	end
-	self:Print(string.format('answer ready in "%s". Type /claude or click the minimap button.', truncate(session.title or session.key or '?', 40)))
+	self:Print(string.format('answer ready in "%s". Type /claude or click the minimap button.', esc(truncate(session.title or session.key or '?', 40))))
 	if self.db.settings.sound and PlaySound and SOUNDKIT and SOUNDKIT.TELL_MESSAGE then
 		PlaySound(SOUNDKIT.TELL_MESSAGE)
 	end
@@ -1100,9 +1168,9 @@ function CC:RenderControls()
 	sizeChip(self, self.projectChip, 'Project', self.ui.project or 'none')
 	sizeChip(self, self.backendChip, 'Backend', self.ui.backend or 'none')
 
+	-- Stop ends the turn of the chat on screen, so it shows only while that one runs
 	local session = (not self.newSession) and self:CurrentSession() or nil
-	local running = (session and session.status == 'running') or (config.running or '') ~= ''
-	self.stopButton:SetShown(running and true or false)
+	self.stopButton:SetShown((session and session.status == 'running') and true or false)
 	self.sendButton.kind = (not self.copying) and 'accent' or nil
 	self.sendButton.label:SetText(self.copying and 'Cancel' or 'Send')
 	self.sendButton:Paint()

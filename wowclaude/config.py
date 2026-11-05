@@ -77,14 +77,23 @@ class BackendConfig:
             raise ValueError(f"backend {name!r}: type openai needs base_url (the server's /v1 root)")
         if self.type in ("openai", "anthropic") and not self.model:
             raise ValueError(f"backend {name!r}: type {self.type} needs a model id")
+        self.validate_env(name)
+
+    def validate_env(self, name: str) -> None:
+        """The env map alone: names to text, and nothing that is or carries a credential."""
         if not isinstance(self.env, dict):
             raise ValueError(f"backend {name!r}: env must be an object of variable names and text values")
         for key, value in self.env.items():
             if not isinstance(key, str) or not _ENV_NAME.match(key) or not isinstance(value, str):
                 raise ValueError(f"backend {name!r}: env must map variable names to text values (bad entry {str(key)[:40]!r})")
+            # Never echo the value: it may be a key pasted in the wrong place.
             if _SECRET_HEADER.search(key):
-                # Never echo the value: it may be a key pasted in the wrong place.
                 raise ValueError(f"backend {name!r}: env.{key} looks like a credential; keys go in api_key_env or api_key_file, never in the config")
+            if _CREDENTIAL_VALUE.search(value):
+                raise ValueError(
+                    f"backend {name!r}: env.{key} carries what looks like a credential (a password inside a URL, or an "
+                    "authorization header); set that variable in the shell that starts the companion, never in the config"
+                )
 
 
 def default_backends() -> dict[str, BackendConfig]:
@@ -185,6 +194,13 @@ def backend(cfg: Config, name: str) -> BackendConfig:
 
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _SECRET_HEADER = re.compile(r"(?i)auth|key|token|secret|cookie")
+# A value that carries a credential whatever its name: user:password@ in a URL,
+# or header text such as "Authorization: ..." / "Bearer ...".
+_CREDENTIAL_VALUE = re.compile(r"(?i)://[^/@\s]+:[^/@\s]*@|\bbearer\s|authorization")
+
+
+def _looks_secret(name: object, value: object) -> bool:
+    return bool(_SECRET_HEADER.search(str(name))) or (isinstance(value, str) and bool(_CREDENTIAL_VALUE.search(value)))
 
 # Variables that tell the Claude Code CLI where its settings and its login live.
 # When one is set in the shell that runs `init`, the login the user sees there
@@ -271,7 +287,7 @@ def redacted(cfg: Config) -> dict:
         b["extra_headers"] = {k: ("***" if _SECRET_HEADER.search(k) else v) for k, v in headers.items()}
         env = b.get("env")
         if isinstance(env, dict):
-            b["env"] = {k: ("***" if _SECRET_HEADER.search(str(k)) else v) for k, v in env.items()}
+            b["env"] = {k: ("***" if _looks_secret(k, v) else v) for k, v in env.items()}
         if b.get("api_key_env") and not _ENV_NAME.match(b["api_key_env"]):
             b["api_key_env"] = "<invalid: looks like a key, not a variable name>"
         if b.get("api_key_env"):
@@ -299,6 +315,14 @@ def set_value(cfg: Config, dotted_key: str, raw_value: str) -> Config:
         raise ValueError("api_key_env takes the NAME of an environment variable (for example ANTHROPIC_API_KEY), never the key itself; nothing was saved")
     data = to_dict(cfg)
     parts = dotted_key.split(".")
+    if len(parts) == 2 and parts[0] == "backends" and not isinstance(value, dict):
+        # A JSON object on the command line loses its quotes in some shells and
+        # arrives as plain text; saving that would silently drop the backend.
+        raise ValueError(
+            f"backends.{parts[1]} takes a JSON object and this value did not parse as one (a shell may have removed its "
+            f"quotes); set one field per command instead, starting with: config set backends.{parts[1]}.type openai; "
+            "nothing was saved"
+        )
     node: dict = data
     for part in parts[:-1]:
         nxt = node.get(part)
@@ -309,18 +333,16 @@ def set_value(cfg: Config, dotted_key: str, raw_value: str) -> Config:
     node[parts[-1]] = value
     updated = from_dict(data)
     for name, bc in updated.backends.items():
-        for key in (bc.env if isinstance(bc.env, dict) else {}):
-            if isinstance(key, str) and _SECRET_HEADER.search(key):
-                # Never echo the value: it may be a key pasted in the wrong place.
-                raise ValueError(
-                    f"backends.{name}.env.{key} looks like a credential; keys go in api_key_env or api_key_file, "
-                    "never in the config; nothing was saved"
-                )
+        try:
+            bc.validate_env(name)
+        except ValueError as exc:
+            raise ValueError(f"{exc}; nothing was saved") from None
     return updated
 
 
 def get_value(cfg: Config, dotted_key: str) -> object:
-    node: object = to_dict(cfg)
+    """A value by dotted key, read from the same redacted view ``config show`` prints."""
+    node: object = redacted(cfg)
     for part in dotted_key.split("."):
         if not isinstance(node, dict) or part not in node:
             raise KeyError(dotted_key)
