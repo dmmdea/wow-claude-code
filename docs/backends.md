@@ -23,7 +23,7 @@ The prompt is written to the CLI's standard input, never to its command line.
 | `max_budget_usd` | `5.0` | passed only when an API key is in use |
 | `model` | the CLI's default | alias or full id |
 | `system_prompt` | none | appended to the CLI's system prompt |
-| `extra_args` | `[]` | anything else, e.g. `["--bare"]` |
+| `extra_args` | `[]` | anything else. `["--bare"]` makes a leaner session, but the CLI then reads no login (API key only) |
 | `env` | `{}` | environment variables set for the CLI process; see below |
 | `api_key_env` / `api_key_file` | none | when set, the key is exported as `ANTHROPIC_API_KEY` to the child only; otherwise the CLI's own login is used |
 
@@ -75,6 +75,12 @@ an API key in use it costs a very small amount.
 
 Stop terminates the child process. The in-flight turn ends without a result; the session stays
 resumable, so the next prompt on the same session continues from the last completed turn.
+
+A turn is finished when the CLI prints its result. The CLI process can keep running after that:
+end-of-session hooks, for example a memory sync, can take half a minute. The companion does not
+hold the answer back for them. The process finishes on its own, Stop no longer touches it, the
+next turn starts only when it has exited (or after two minutes), and when the companion exits it
+waits up to 90 seconds for it.
 
 The companion never logs you in and never touches your Claude credentials: it runs your own
 installed CLI, which authenticates the way you set it up (`claude auth status` shows which).

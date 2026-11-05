@@ -32,7 +32,7 @@ file from disk at that moment, and the answer appears in the window with no relo
 have a fallback: with the clipboard path off, a send reloads the UI as in 0.1; when the live checks
 run out, the Refresh button becomes Reload UI.
 
-**Status:** 0.2.1, early release. The companion, its three backends and the file formats are
+**Status:** 0.2.2, early release. The companion, its three backends and the file formats are
 exercised by real runs on Windows. The window and the live channel are new in this release.
 Please report what breaks in [Issues](https://github.com/dmmdea/wow-claude-code/issues).
 
@@ -232,7 +232,8 @@ remove the quotes of a JSON object.
 | `backends.<name>.permission_mode` | `acceptEdits` | Claude Code permission mode; prompts are auto-denied in print mode, so `default` behaves like read-mostly and `bypassPermissions` runs everything (your call) |
 | `backends.<name>.allowed_tools` | `[]` | extra `--allowedTools` entries |
 | `backends.<name>.max_budget_usd` | `5.0` | per-turn cap, applied only when a key is used (a CLI login is not billed per turn) |
-| `backends.<name>.extra_args` | `[]` | extra CLI flags, for example `["--bare"]` for a leaner session |
+| `backends.<name>.extra_args` | `[]` | extra CLI flags. `["--bare"]` gives a leaner session, but the CLI then reads no login, so use it only with an API key |
+| `backends.<name>.model` | the CLI's default | model for this backend: an alias such as `sonnet` or `haiku`, or a full id |
 | `backends.<name>.env` | `{}` | `claude-code` only: environment variables set for the CLI process, for a login kept outside the default folder; names that look like credentials, and values that carry one, are refused |
 | `clipboard_watch` | `false` | the clipboard send path; `init` asks, and on a first run the default answer is yes |
 | `live_slots` | `200` | how many live slot folders `install` creates, 0 to 400; 0 turns live answers off |
@@ -335,6 +336,10 @@ none of it is a promise that the game's rules allow it:
   for you. Open a terminal in the repository folder and run `python -m wowclaude run` (or
   `wowclaude run` if you installed it with `pipx` or `uv`). To start it at login, add that command
   to your system's own startup items.
+- *Answers are slow, or use a lot of your Claude usage*: every message starts a full Claude Code
+  session in the project folder, with your own settings, hooks and MCP servers, on the CLI's
+  default model. Pick a lighter model for the game with
+  `python -m wowclaude config set backends.claude-code.model sonnet` and restart the companion.
 - *`run` says "another companion is already running"*: one is, possibly in a window you forgot or
   started hidden. Use that one, or stop it first; the lock goes away with its process.
 - *`claude` not found*: install the Claude Code CLI, or set `backends.claude-code.claude_bin` to

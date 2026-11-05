@@ -307,6 +307,15 @@ class Bridge:
             except Exception as exc:  # noqa: BLE001 - a missed heartbeat must not end the turn
                 self.log(f"heartbeat write failed ({exc})")
 
+    def close(self, limit: float = 90.0) -> None:
+        """Before the companion exits: let the CLI process of the last turn
+        finish closing its session, so its end-of-session hooks are not cut."""
+        for name, backend in self._backends.items():
+            busy = getattr(backend, "busy", None)
+            if busy and busy():
+                self.log(f"waiting for the last {name} session to close (up to {int(limit)}s)")
+                backend.wait_previous(None, limit)
+
     def _backend_for(self, name: str) -> tuple[str, Backend]:
         name = name or self.cfg.default_backend
         if name not in self._backends:
